@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deca_auto"
+version = "1.0.0"
+description = "PDN Impedance Optimization Tool with Decoupling Capacitor Auto-selection"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "PDN Team", email = "pdn@example.com"}
+]
+dependencies = [
+    "numpy>=2.3,<3.0",
+    "pandas>=2.3",
+    "cupy-cuda12x>=13.6,<14.0",
+    "pyspice>=1.5",
+    "scikit-rf>=1.8,<2.0",
+    "scipy>=1.16",
+    "streamlit>=1.50,<2.0",
+    "altair>=5.5,<6.0",
+    "xlsxwriter>=3.2.9,<4.0",
+    "tqdm>=4.67,<5.0",
+    "tomlkit>=0.13"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "black>=24.0",
+    "mypy>=1.8",
+    "ruff>=0.3"
+]
+
+[project.scripts]
+deca-auto = "deca_auto.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+deca_auto = ["*.toml"]
