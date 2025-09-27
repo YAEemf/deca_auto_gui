@@ -23,7 +23,7 @@ def calculate_pdn_parasitic_elements(f_grid: np.ndarray, config: UserConfig,
         xp: バックエンドモジュール
     
     Returns:
-        寄生成分の辞書
+        寄生成分の辞書（'omega'も含む）
     """
     omega = 2 * xp.pi * f_grid
     
@@ -61,7 +61,8 @@ def calculate_pdn_parasitic_elements(f_grid: np.ndarray, config: UserConfig,
         'z_s': z_s,
         'z_sN': z_sN,
         'y_p': y_p,
-        'z_mntN': z_mntN
+        'z_mntN': z_mntN,
+        'omega': omega  # omegaも保存
     }
 
 
@@ -99,6 +100,9 @@ def assemble_pdn_ladder(count_vector: np.ndarray,
     # VRMから開始（アドミタンス）
     y_total = y_vrm
     
+    # 周波数点数から推定（parasitic_elementsはすべて同じ長さ）
+    n_freq = len(y_vrm)
+    
     # コンデンサラダーを逆順で構築（VRM側から測定ノード側へ）
     # 容量の大きい順（VRM側）から小さい順（測定ノード側）へ
     cap_names = list(capacitor_impedances.keys())
@@ -113,10 +117,18 @@ def assemble_pdn_ladder(count_vector: np.ndarray,
             # マウントインダクタンスを追加
             # 各コンデンサ固有のL_mntがある場合はそれを使用
             cap_config = next((c for c in config.capacitors if c['name'] == cap_names[i]), None)
-            if cap_config and 'L_mnt' in cap_config and cap_config['L_mnt'] is not None:
-                omega = 2 * xp.pi * parasitic_elements['y_vrm'].shape[0]
-                z_mnt_custom = 1j * omega * cap_config['L_mnt']
-                z_cm = z_c + z_mnt_custom
+            if cap_config and cap_config.get('L_mnt') is not None:
+                # omegaを取得
+                omega = parasitic_elements.get('omega')
+                if omega is not None:
+                    z_mnt_custom = 1j * omega * cap_config['L_mnt']
+                    z_cm = z_c + z_mnt_custom
+                else:
+                    # フォールバック：z_mntNから逆算
+                    omega_L_mntN = xp.imag(z_mntN)
+                    omega = omega_L_mntN / config.L_mntN if config.L_mntN > 0 else xp.zeros_like(z_c)
+                    z_mnt_custom = 1j * omega * cap_config['L_mnt']
+                    z_cm = z_c + z_mnt_custom
             else:
                 z_cm = z_c + z_mntN
             
@@ -178,11 +190,11 @@ def calculate_pdn_impedance_batch(count_vectors: np.ndarray,
     z_cap_array = xp.stack([capacitor_impedances[name] for name in cap_names])  # (N_caps, N_freq)
     
     # マウントインダクタンス配列
-    omega = 2 * xp.pi * f_grid
+    omega = parasitic_elements.get('omega', 2 * xp.pi * f_grid)
     z_mnt_array = xp.zeros_like(z_cap_array)
     for i, name in enumerate(cap_names):
         cap_config = next((c for c in config.capacitors if c['name'] == name), None)
-        if cap_config and 'L_mnt' in cap_config and cap_config['L_mnt'] is not None:
+        if cap_config and cap_config.get('L_mnt') is not None:
             z_mnt_array[i] = 1j * omega * cap_config['L_mnt']
         else:
             z_mnt_array[i] = parasitic_elements['z_mntN']
@@ -270,6 +282,7 @@ def calculate_pdn_impedance_monte_carlo(count_vector: np.ndarray,
     
     # 寄生成分（固定）
     parasitic_elements = calculate_pdn_parasitic_elements(f_grid, config, xp)
+    omega = parasitic_elements.get('omega', 2 * xp.pi * f_grid)
     
     for sample_idx in range(n_samples):
         # コンデンサパラメータのばらつき生成

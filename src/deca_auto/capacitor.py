@@ -247,10 +247,14 @@ def calculate_rlc_impedance(cap_config: Dict, f_grid: np.ndarray,
         複素インピーダンス
     """
     # パラメータ取得（デフォルト値使用）
-    C = cap_config.get('C', 1e-6)  # 容量 [F]
-    ESR = cap_config.get('ESR', 15e-3)  # ESR [Ω]
-    ESL = cap_config.get('ESL', 0.5e-9)  # ESL [H]
-    L_mnt = cap_config.get('L_mnt', L_mntN)  # マウントインダクタンス [H]
+    C = cap_config.get('C', 1e-6) if cap_config.get('C') is not None else 1e-6
+    ESR = cap_config.get('ESR', 15e-3) if cap_config.get('ESR') is not None else 15e-3
+    ESL = cap_config.get('ESL', 0.5e-9) if cap_config.get('ESL') is not None else 0.5e-9
+    
+    # L_mntの処理：Noneの場合はデフォルト値を使用
+    L_mnt = cap_config.get('L_mnt')
+    if L_mnt is None:
+        L_mnt = L_mntN
     
     # 角周波数
     omega = 2 * xp.pi * f_grid

@@ -113,16 +113,28 @@ class UserConfig:
 USER_CONFIG = UserConfig()
 
 
-def parse_scientific_notation(value: str) -> float:
+def parse_scientific_notation(value: Any) -> float:
     """科学的記数法を解析（10e3, 1.6e-19形式に対応）"""
+    if value is None:
+        raise ValueError("値がNoneです")
+    
+    # すでに数値の場合
+    if isinstance(value, (int, float)):
+        return float(value)
+    
+    # 文字列に変換
+    value_str = str(value).strip()
+    if not value_str:
+        raise ValueError("空の文字列です")
+    
     try:
         # 通常の浮動小数点数として解析を試みる
-        return float(value)
+        return float(value_str)
     except ValueError:
         # 10e3形式の場合の処理
-        value = value.replace(" ", "")
-        if "e" in value.lower():
-            parts = value.lower().split("e")
+        value_str = value_str.replace(" ", "")
+        if "e" in value_str.lower():
+            parts = value_str.lower().split("e")
             if len(parts) == 2:
                 try:
                     base = float(parts[0]) if parts[0] else 1.0
@@ -130,7 +142,7 @@ def parse_scientific_notation(value: str) -> float:
                     return base * (10 ** exp)
                 except:
                     pass
-        raise ValueError(f"無効な数値形式: {value}")
+        raise ValueError(f"無効な数値形式: {value_str}")
 
 
 def load_config(config_path: Optional[Union[str, Path]] = None) -> UserConfig:
@@ -185,9 +197,12 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> UserConfig:
                 elif isinstance(value, str) and key.startswith(("f_", "R_", "L_", "C_", "z_", "tol_", "tan_", "dc_", "mlcc_", "max_vram_", "min_total_", "weight_")):
                     # 数値パラメータの処理
                     try:
-                        setattr(config, key, parse_scientific_notation(value))
+                        parsed_value = parse_scientific_notation(value)
+                        setattr(config, key, parsed_value)
                     except:
-                        setattr(config, key, value)
+                        # 解析に失敗した場合は元の値を保持
+                        print(f"警告: パラメータ {key} の解析に失敗: {value}")
+                        # デフォルト値を保持（setattr しない）
                 else:
                     setattr(config, key, value)
         
