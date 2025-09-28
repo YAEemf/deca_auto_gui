@@ -297,6 +297,23 @@ def create_sidebar():
                     step=0.1
                 )
 
+        with st.expander("システム"):
+            # Language: jp / en
+            lang = st.selectbox(
+                "Language",
+                options=["jp", "en"],
+                value=(config.language if getattr(config, "language", "jp") in ("jp", "en") else "jp")
+            )
+            config.language = lang
+
+            # Theme: Dark / Light
+            theme_choice = st.selectbox(
+                "Theme",
+                options=["Light Theme", "Dark Theme"],
+                value=("Dark Theme" if getattr(config, "dark_theme", False) else "Light Theme")
+            )
+            config.dark_theme = (theme_choice == "Dark Theme")
+
 
 def create_main_content():
     """メインコンテンツの作成"""
@@ -467,7 +484,12 @@ def create_results_tab():
             with progress_placeholder.container():
                 col1, col2 = st.columns([3, 1])
                 with col1:
-                    st.progress(st.session_state.progress_value)
+                    prog = st.progress(st.session_state.progress_value)
+                    # ★ 下中央に % 表示
+                    pct = int(round(st.session_state.progress_value * 100))
+                    cL, cC, cR = st.columns([1, 2, 1])
+                    with cC:
+                        st.markdown(f"**{pct}%**", help="進捗率")
                 with col2:
                     st.info("🔄 最適化実行中...")
             
@@ -511,6 +533,9 @@ def create_results_tab():
                     col1, col2 = st.columns([3, 1])
                     with col1:
                         st.progress(1.0)
+                        cL, cC, cR = st.columns([1, 2, 1])
+                        with cC:
+                            st.markdown("**100%**")
                     with col2:
                         st.success("✅ 最適化完了")
                 st.rerun()
@@ -644,10 +669,21 @@ def create_zpdn_chart() -> alt.Chart:
     if target_mask is not None:
         target_np = ensure_numpy(target_mask)
         step = max(1, len(f_grid_np) // 100)
+        # custom_mask の帯域を取得（なければ全帯域）
+        f_lo, f_hi = None, None
+        if st.session_state.config.z_custom_mask:
+            freqs = [pt[0] for pt in st.session_state.config.z_custom_mask if pt and len(pt) >= 2]
+            if freqs:
+                f_lo, f_hi = min(freqs), max(freqs)
+
         for j in range(0, len(f_grid_np), step):
             if j < len(f_grid_np) and j < len(target_np):
+                fval = float(f_grid_np[j])
+                # ★ custom_mask の帯域外はスキップ
+                if (f_lo is not None and fval < f_lo) or (f_hi is not None and fval > f_hi):
+                    continue
                 data_list.append({
-                    'Frequency': float(f_grid_np[j]),
+                    'Frequency': fval,
                     'Impedance': float(target_np[j]),
                     'Type': 'Target Mask',
                     'Order': 999  # 最後に表示
@@ -660,7 +696,7 @@ def create_zpdn_chart() -> alt.Chart:
     df = pd.DataFrame(data_list)
     
     # Altairチャート作成
-    chart = alt.Chart(df).mark_line().encode(
+    chart = alt.Chart(df).mark_line(clip=True).encode(
         x=alt.X('Frequency:Q',
                 scale=alt.Scale(type='log', base=10),
                 axis=alt.Axis(title='Frequency [Hz]', grid=True)),
