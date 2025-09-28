@@ -46,7 +46,7 @@ class UserConfig:
             (2e6, 25e-3),
             (1e8, 1.3e0),
         ]
-    )
+    )  # カスタムマスク [(freq, impedance), ...]
     
     # PDN寄生成分
     R_vrm: float = 10e-3  # VRM抵抗 [Ω]
@@ -395,6 +395,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "search_settings": "探索設定",
             "monte_carlo": "Monte Carlo設定",
             "gpu_settings": "GPU設定",
+            "weights": "評価重み",
             "apply_settings": "設定を適用",
             "calculate_zc_only": "Z_cのみ計算",
             "use_custom_mask": "カスタムマスクを使用",
@@ -416,6 +417,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "search_settings": "Search Settings",
             "monte_carlo": "Monte Carlo Settings",
             "gpu_settings": "GPU Settings",
+            "weights": "Evaluation Weights",
             "apply_settings": "Apply Settings",
             "calculate_zc_only": "Calculate Z_c Only",
             "use_custom_mask": "Use Custom Mask",

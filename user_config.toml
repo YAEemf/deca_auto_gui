@@ -61,7 +61,7 @@ weight_mean = 0.5   # 平均値の重み
 weight_anti = 0.35  # アンチレゾナンスの重み
 weight_flat = 0.15  # フラットネスの重み
 weight_under = -0.1 # 余裕面積の重み（負値）
-weight_parts = 0    # 部品点数ペナルティの重み
+weight_parts = 0.0    # 部品点数ペナルティの重み
 weight_mc_worst = 1.0  # Monte Carlo最悪値の重み
 
 [monte_carlo]
