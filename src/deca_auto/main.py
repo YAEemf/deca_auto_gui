@@ -305,6 +305,14 @@ def run_optimization(config: UserConfig,
         cap_impedances = calculate_all_capacitor_impedances(
             config, f_grid, xp, gui_callback
         )
+        
+        # GUIに周波数グリッドとターゲットマスクを送信
+        if gui_callback:
+            gui_callback({
+                'type': 'grid_update',
+                'frequency_grid': transfer_to_device(f_grid, np),
+                'target_mask': transfer_to_device(target_mask, np)
+            })
     
     # 容量でソート（小→大）
     capacitor_names = list(cap_impedances.keys())
@@ -421,7 +429,9 @@ def run_optimization(config: UserConfig,
                         'type': 'top_k_update',
                         'top_k': global_top_k,
                         'progress': (chunk_id + 1) / num_chunks,
-                        'capacitor_names': sorted_cap_names
+                        'capacitor_names': sorted_cap_names,
+                        'frequency_grid': transfer_to_device(f_grid, np),
+                        'target_mask': transfer_to_device(target_mask, np)
                     })
                 
                 # 進捗ログ

@@ -73,6 +73,15 @@ def initialize_session_state():
     
     if 'no_search_mode' not in st.session_state:
         st.session_state.no_search_mode = os.environ.get('DECA_NO_SEARCH', '0') == '1'
+    
+    if 'active_tab' not in st.session_state:
+        st.session_state.active_tab = 0  # 0: Settings, 1: Results
+    
+    if 'file_upload_key' not in st.session_state:
+        st.session_state.file_upload_key = 0  # ファイルアップローダーのキー
+    
+    if 'last_uploaded_file' not in st.session_state:
+        st.session_state.last_uploaded_file = None  # 前回のアップロードファイル名
 
 
 def create_sidebar():
@@ -89,27 +98,37 @@ def create_sidebar():
         uploaded_file = st.file_uploader(
             get_localized_text('load_config', config),
             type=['toml'],
-            help=get_localized_text('drop_config', config)
+            help=get_localized_text('drop_config', config),
+            key=f"file_uploader_{st.session_state.file_upload_key}"
         )
         
         if uploaded_file is not None:
-            try:
-                # アップロードされたファイルを一時保存
-                temp_path = Path(f"temp_{uploaded_file.name}")
-                with open(temp_path, 'wb') as f:
-                    f.write(uploaded_file.read())
-                
-                # 設定読み込み
-                new_config = load_config(temp_path)
-                st.session_state.config = new_config
-                st.success("設定ファイルを読み込みました")
-                
-                # 一時ファイル削除
-                temp_path.unlink()
-                st.rerun()  # 画面更新
-            except Exception as e:
-                st.error(f"読み込みエラー: {e}")
-                logger.error(f"設定ファイル読み込みエラー: {e}")
+            # 新しいファイルの場合のみ処理
+            current_file_name = uploaded_file.name if uploaded_file else None
+            if current_file_name != st.session_state.last_uploaded_file:
+                try:
+                    # アップロードされたファイルを一時保存
+                    temp_path = Path(f"temp_{uploaded_file.name}")
+                    with open(temp_path, 'wb') as f:
+                        f.write(uploaded_file.read())
+                    
+                    # 設定読み込み
+                    new_config = load_config(temp_path)
+                    st.session_state.config = new_config
+                    st.success("設定ファイルを読み込みました")
+                    
+                    # 一時ファイル削除
+                    temp_path.unlink()
+                    
+                    # アップロードファイル名を記録
+                    st.session_state.last_uploaded_file = current_file_name
+                    
+                    # ファイルアップローダーをリセット
+                    st.session_state.file_upload_key += 1
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"読み込みエラー: {e}")
+                    logger.error(f"設定ファイル読み込みエラー: {e}")
         
         # 保存ボタン
         col1, col2 = st.columns(2)
@@ -206,6 +225,20 @@ def create_sidebar():
                 "Shuffle evaluation",
                 value=config.shuffle_evaluation
             )
+        
+        # 評価重み
+        with st.expander(get_localized_text('weights', config) if config.language == 'jp' else 'Evaluation Weights'):
+            col1, col2 = st.columns(2)
+            with col1:
+                config.weight_max = st.slider("Max weight", 0.0, 2.0, config.weight_max, 0.05)
+                config.weight_area = st.slider("Area weight", 0.0, 2.0, config.weight_area, 0.05)
+                config.weight_mean = st.slider("Mean weight", 0.0, 2.0, config.weight_mean, 0.05)
+                config.weight_anti = st.slider("Anti-resonance weight", 0.0, 2.0, config.weight_anti, 0.05)
+            with col2:
+                config.weight_flat = st.slider("Flatness weight", 0.0, 2.0, config.weight_flat, 0.05)
+                config.weight_under = st.slider("Under weight", -2.0, 2.0, config.weight_under, 0.05)
+                config.weight_parts = st.slider("Parts penalty weight", 0.0, 2.0, config.weight_parts, 0.05)
+                config.weight_mc_worst = st.slider("MC worst weight", 0.0, 2.0, config.weight_mc_worst, 0.05)
         
         # Monte Carlo設定
         with st.expander(get_localized_text('monte_carlo', config)):
@@ -336,9 +369,12 @@ def create_settings_tab():
     # 目標マスク設定
     st.subheader(get_localized_text('target_mask', config))
     
+    # カスタムマスクの確認（TOMLから読み込まれている場合も考慮）
+    has_custom_mask = config.z_custom_mask is not None and len(config.z_custom_mask) > 0
+    
     use_custom = st.checkbox(
         get_localized_text('use_custom_mask', config),
-        value=config.z_custom_mask is not None
+        value=has_custom_mask
     )
     
     if not use_custom:
@@ -352,9 +388,25 @@ def create_settings_tab():
     else:
         # カスタムマスク編集
         if config.z_custom_mask:
+            # 既存のカスタムマスクを表示
             mask_data = pd.DataFrame(config.z_custom_mask, columns=['Frequency [Hz]', 'Impedance [Ω]'])
+            # 値をフォーマット
+            mask_data['Frequency [Hz]'] = mask_data['Frequency [Hz]'].apply(format_value)
+            mask_data['Impedance [Ω]'] = mask_data['Impedance [Ω]'].apply(format_value)
         else:
-            mask_data = pd.DataFrame(columns=['Frequency [Hz]', 'Impedance [Ω]'])
+            # デフォルトのカスタムマスクを作成
+            default_mask = [
+                (1e3, 10e-3),
+                (1e4, 10e-3),
+                (1e5, 10e-3),
+                (1e6, 20e-3),
+                (1e7, 50e-3),
+                (1e8, 100e-3)
+            ]
+            mask_data = pd.DataFrame(default_mask, columns=['Frequency [Hz]', 'Impedance [Ω]'])
+            mask_data['Frequency [Hz]'] = mask_data['Frequency [Hz]'].apply(format_value)
+            mask_data['Impedance [Ω]'] = mask_data['Impedance [Ω]'].apply(format_value)
+            config.z_custom_mask = default_mask
         
         edited_mask = st.data_editor(
             mask_data,
@@ -374,6 +426,16 @@ def create_settings_tab():
                 if mask_points:
                     config.z_custom_mask = sorted(mask_points, key=lambda x: x[0])
                     st.success("カスタムマスクを更新しました")
+                    # 目標マスクを再生成
+                    if st.session_state.frequency_grid is not None:
+                        from deca_auto.utils import create_target_mask, get_backend
+                        xp, _, _ = get_backend(config.force_numpy, config.cuda)
+                        st.session_state.target_mask = ensure_numpy(create_target_mask(
+                            st.session_state.frequency_grid,
+                            config.z_target,
+                            config.z_custom_mask,
+                            xp
+                        ))
                 else:
                     st.error("有効なマスクポイントがありません")
 
@@ -384,65 +446,105 @@ def create_results_tab():
     
     st.header(get_localized_text('results', config))
     
-    # 進捗表示エリア
-    progress_container = st.container()
-    
-    # 進捗表示
+    # 最適化実行中の場合、自動更新を有効化
     if st.session_state.optimization_running:
-        with progress_container:
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                # 進捗バー（session_stateに保存）
-                if 'progress_value' not in st.session_state:
-                    st.session_state.progress_value = 0.0
-                progress_bar = st.progress(st.session_state.progress_value)
-            with col2:
-                st.info("🔄 最適化実行中...")
+        # 定期的な更新のためのプレースホルダー
+        progress_placeholder = st.empty()
+        graph1_placeholder = st.empty()
+        graph2_placeholder = st.empty()
+        table_placeholder = st.empty()
+        
+        # ポーリングループ（0.5秒ごと）
+        import time
+        max_iterations = 1000  # 最大500秒（約8分）
+        
+        for i in range(max_iterations):
+            # キューを処理
+            process_result_queue()
+            
+            # プログレス表示
+            with progress_placeholder.container():
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.progress(st.session_state.progress_value)
+                with col2:
+                    st.info("🔄 最適化実行中...")
+            
+            # グラフ1: コンデンサのZ_c特性
+            with graph1_placeholder.container():
+                st.subheader("📈 コンデンサインピーダンス特性 |Z_c|")
+                if st.session_state.capacitor_impedances and st.session_state.frequency_grid is not None:
+                    try:
+                        zc_chart = create_zc_chart()
+                        st.altair_chart(zc_chart, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"グラフ描画エラー: {e}")
+                else:
+                    st.info("コンデンサのインピーダンス計算中...")
+            
+            # グラフ2: Top-kのZ_pdn特性
+            with graph2_placeholder.container():
+                st.subheader("📊 PDNインピーダンス特性 |Z_pdn| (Top-k)")
+                if st.session_state.top_k_results and st.session_state.frequency_grid is not None:
+                    try:
+                        zpdn_chart = create_zpdn_chart()
+                        st.altair_chart(zpdn_chart, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"グラフ描画エラー: {e}")
+                else:
+                    st.info("探索実行中...")
+            
+            # Top-k結果テーブル
+            with table_placeholder.container():
+                if st.session_state.top_k_results:
+                    st.subheader("🏆 Top-k 結果")
+                    try:
+                        results_df = create_results_dataframe()
+                        st.dataframe(results_df, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"テーブル作成エラー: {e}")
+            
+            # 最適化が完了したらループを抜ける
+            if not st.session_state.optimization_running:
+                break
+            
+            # 0.5秒待機
+            time.sleep(0.5)
     
-    # グラフ1: コンデンサのZ_c特性
-    st.subheader("📈 コンデンサインピーダンス特性 |Z_c|")
-    zc_chart_container = st.container()
-    
-    with zc_chart_container:
+    else:
+        # 最適化実行中でない場合は通常の表示
+        # グラフ1: コンデンサのZ_c特性
+        st.subheader("📈 コンデンサインピーダンス特性 |Z_c|")
         if st.session_state.capacitor_impedances and st.session_state.frequency_grid is not None:
             try:
                 zc_chart = create_zc_chart()
                 st.altair_chart(zc_chart, use_container_width=True)
             except Exception as e:
                 st.error(f"グラフ描画エラー: {e}")
-                logger.error(f"Z_cグラフエラー: {e}")
         else:
             st.info("コンデンサのインピーダンスを計算してください")
-    
-    st.divider()
-    
-    # グラフ2: Top-kのZ_pdn特性
-    st.subheader("📊 PDNインピーダンス特性 |Z_pdn| (Top-k)")
-    zpdn_chart_container = st.container()
-    
-    with zpdn_chart_container:
+        
+        st.divider()
+        
+        # グラフ2: Top-kのZ_pdn特性
+        st.subheader("📊 PDNインピーダンス特性 |Z_pdn| (Top-k)")
         if st.session_state.top_k_results and st.session_state.frequency_grid is not None:
             try:
                 zpdn_chart = create_zpdn_chart()
                 st.altair_chart(zpdn_chart, use_container_width=True)
             except Exception as e:
                 st.error(f"グラフ描画エラー: {e}")
-                logger.error(f"Z_pdnグラフエラー: {e}")
         else:
             st.info("探索を実行してください")
-    
-    # Top-k結果テーブル
-    if st.session_state.top_k_results:
-        st.subheader("🏆 Top-k 結果")
-        try:
-            results_df = create_results_dataframe()
-            st.dataframe(results_df, use_container_width=True)
-        except Exception as e:
-            st.error(f"テーブル作成エラー: {e}")
-            logger.error(f"結果テーブルエラー: {e}")
-    
-    # 結果キューの処理
-    process_result_queue()
+        
+        # Top-k結果テーブル
+        if st.session_state.top_k_results:
+            st.subheader("🏆 Top-k 結果")
+            try:
+                results_df = create_results_dataframe()
+                st.dataframe(results_df, use_container_width=True)
+            except Exception as e:
+                st.error(f"テーブル作成エラー: {e}")
 
 
 def create_zc_chart() -> alt.Chart:
@@ -701,6 +803,13 @@ def start_optimization():
     st.session_state.optimization_running = True
     st.session_state.progress_value = 0.0
     
+    # キューをクリア
+    while not st.session_state.result_queue.empty():
+        try:
+            st.session_state.result_queue.get_nowait()
+        except:
+            break
+    
     # ワーカースレッド開始
     thread = threading.Thread(
         target=optimization_worker,
@@ -711,7 +820,9 @@ def start_optimization():
     st.session_state.optimization_thread = thread
     
     st.success("最適化を開始しました")
-    st.rerun()  # すぐに画面更新
+    
+    # タブが切り替わるようにrerunを呼ぶ
+    st.rerun()
 
 
 def stop_optimization():
@@ -764,6 +875,9 @@ def calculate_zc_only():
         st.session_state.capacitor_impedances = cap_impedances
         
         st.success("Z_c計算が完了しました")
+        
+        # タブを切り替えてrerun
+        st.session_state.active_tab = 1
         st.rerun()
         
     except Exception as e:
@@ -775,10 +889,11 @@ def calculate_zc_only():
 def process_result_queue():
     """結果キューを処理"""
     try:
-        needs_rerun = False
+        processed = False
         
         while not st.session_state.result_queue.empty():
             data = st.session_state.result_queue.get_nowait()
+            processed = True
             
             if data['type'] == 'capacitor_update':
                 # コンデンサインピーダンス更新
@@ -787,8 +902,13 @@ def process_result_queue():
                 # 周波数グリッドも更新（初回のみ）
                 if 'frequency' in data and st.session_state.frequency_grid is None:
                     st.session_state.frequency_grid = data['frequency']
-                
-                needs_rerun = True
+            
+            elif data['type'] == 'grid_update':
+                # 周波数グリッドと目標マスク更新
+                if 'frequency_grid' in data:
+                    st.session_state.frequency_grid = data['frequency_grid']
+                if 'target_mask' in data:
+                    st.session_state.target_mask = data['target_mask']
                 
             elif data['type'] == 'top_k_update':
                 # Top-k更新
@@ -805,8 +925,6 @@ def process_result_queue():
                 if 'progress' in data:
                     st.session_state.progress_value = data['progress']
                 
-                needs_rerun = True
-                
             elif data['type'] == 'complete':
                 # 完了
                 st.session_state.optimization_running = False
@@ -821,7 +939,6 @@ def process_result_queue():
                     st.session_state.target_mask = results.get('target_mask')
                 
                 st.success("最適化が完了しました")
-                needs_rerun = True
                 
             elif data['type'] == 'error':
                 # エラー
@@ -829,16 +946,15 @@ def process_result_queue():
                 st.session_state.progress_value = 0.0
                 st.error(f"エラー: {data['message']}")
         
-        # 画面更新が必要な場合
-        if needs_rerun:
-            st.rerun()
+        return processed
     
     except queue.Empty:
-        pass
+        return False
     except Exception as e:
         logger.error(f"キュー処理エラー: {e}")
         import traceback
         traceback.print_exc()
+        return False
 
 
 # メイン実行
