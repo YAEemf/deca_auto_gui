@@ -406,6 +406,9 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "save_as": "名前を付けて保存",
             "load_config": "設定ファイルを読み込む",
             "drop_config": "設定ファイルをここにドロップ",
+            "system":"システム",
+            "language": "Language",
+            "theme": "テーマ",
         },
         "en": {
             "title": "PDN Impedance Optimization Tool",
@@ -428,6 +431,9 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "save_as": "Save As",
             "load_config": "Load Config File",
             "drop_config": "Drop config file here",
+            "system":"system",
+            "language": "言語",
+            "theme": "theme",
         }
     }
     

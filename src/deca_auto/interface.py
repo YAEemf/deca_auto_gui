@@ -297,20 +297,25 @@ def create_sidebar():
                     step=0.1
                 )
 
-        with st.expander("システム"):
+        with st.expander(get_localized_text('system', config)):
             # Language: jp / en
             lang = st.selectbox(
-                "Language",
-                options=["jp", "en"],
-                value=(config.language if getattr(config, "language", "jp") in ("jp", "en") else "jp")
+                get_localized_text('language', config),
+                options=["日本語", "English"],
             )
-            config.language = lang
+            if lang == "日本語":
+                config.language = "jp"
+            elif lang == "English":
+                config.language = "en"
+            # elif lang == "汉语":
+            #     config.language = "zh"
+            else:
+                config.language = "jp"
 
             # Theme: Dark / Light
             theme_choice = st.selectbox(
-                "Theme",
+                get_localized_text('theme', config),
                 options=["Light Theme", "Dark Theme"],
-                value=("Dark Theme" if getattr(config, "dark_theme", False) else "Light Theme")
             )
             config.dark_theme = (theme_choice == "Dark Theme")
 
