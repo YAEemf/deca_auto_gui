@@ -37,7 +37,16 @@ class UserConfig:
     
     # 目標マスク
     z_target: float = 10e-3  # フラット目標インピーダンス [Ω]
-    z_custom_mask: Optional[List[Tuple[float, float]]] = None  # カスタムマスク [(freq, impedance), ...]
+    z_custom_mask: Optional[List[Tuple[float, float]]] = field(
+        default_factory=lambda: [
+            (1e3, 10e-3),
+            (5e3, 10e-3),
+            (2e4, 8e-3),
+            (5e4, 8e-3),
+            (2e6, 25e-3),
+            (1e8, 1.3e0),
+        ]
+    )
     
     # PDN寄生成分
     R_vrm: float = 10e-3  # VRM抵抗 [Ω]
@@ -59,10 +68,12 @@ class UserConfig:
     
     # コンデンサリスト
     capacitors: List[Dict[str, Any]] = field(default_factory=lambda: [
-        {"name": "C_0603_1u", "C": 1e-6, "ESR": 10e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_4.7u", "C": 4.7e-6, "ESR": 8e-3, "ESL": 0.5e-9},
-        {"name": "C_1608_10u", "C": 10e-6, "ESR": 5e-3, "ESL": 0.8e-9},
-        {"name": "C_2012_22u", "C": 22e-6, "ESR": 3e-3, "ESL": 1.0e-9},
+        {"name": "C_0603_0.1u", "C": 0.1e-6, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_1u", "C": 1e-6, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_4.7u", "C": 4.7e-6, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_1608_10u", "C": 10e-6, "ESR": 15e-3, "ESL": 0.8e-9},
+        {"name": "C_2012_22u", "C": 22e-6, "ESR": 15e-3, "ESL": 1.0e-9},
+        {"name": "C_Poly_100u", "C": 100e-6, "ESR": 100e-3, "ESL": 1.5e-9},
     ])
     
     # 探索設定
@@ -79,7 +90,7 @@ class UserConfig:
     weight_anti: float = 0.35
     weight_flat: float = 0.15
     weight_under: float = -0.1
-    weight_parts: float = 0
+    weight_parts: float = 0.0
     weight_mc_worst: float = 1.0
     
     # Monte Carlo設定
