@@ -24,6 +24,7 @@ from deca_auto.main import run_optimization
 from deca_auto.capacitor import calculate_all_capacitor_impedances
 from deca_auto.evaluator import format_combination_name
 
+MAX_POINTS = 1024
 
 # Streamlit設定
 st.set_page_config(
@@ -506,6 +507,12 @@ def create_results_tab():
             
             # 最適化が完了したらループを抜ける
             if not st.session_state.optimization_running:
+                with progress_placeholder.container():
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.progress(1.0)
+                    with col2:
+                        st.success("✅ 最適化完了")
                 break
             
             # 0.5秒待機
@@ -560,7 +567,7 @@ def create_zc_chart() -> alt.Chart:
             f_grid_np = ensure_numpy(f_grid)
             
             # データフレーム用にデータを整形（間引き）
-            step = max(1, len(f_grid_np) // 100)
+            step = max(1, len(f_grid_np)//MAX_POINTS)
             for i in range(0, len(f_grid_np), step):
                 if i < len(f_grid_np):
                     data_list.append({
@@ -622,7 +629,7 @@ def create_zpdn_chart() -> alt.Chart:
             z_pdn_np = ensure_numpy(z_pdn)
             if len(z_pdn_np) > 0:
                 # データフレーム用にデータを整形（間引き）
-                step = max(1, len(f_grid_np) // 100)
+                step = max(1, len(f_grid_np)//MAX_POINTS)
                 for j in range(0, len(f_grid_np), step):
                     if j < len(f_grid_np) and j < len(z_pdn_np):
                         data_list.append({
@@ -659,9 +666,11 @@ def create_zpdn_chart() -> alt.Chart:
         y=alt.Y('Impedance:Q',
                 scale=alt.Scale(type='log', base=10),
                 axis=alt.Axis(title='|Z| [Ω]', grid=True)),
-        color=alt.Color('Type:N',
-                       scale=alt.Scale(scheme='category10'),
-                       legend=alt.Legend(title='Configuration')),
+        color=alt.Color(
+            'Type:N',
+            legend=alt.Legend(title='Configuration'),
+            sort=alt.SortField(field='Order', order='ascending')
+        ),
         strokeDash=alt.condition(
             alt.datum.Type == 'Target Mask',
             alt.value([5, 5]),  # 破線
@@ -718,7 +727,9 @@ def create_results_dataframe() -> pd.DataFrame:
         # データが空の場合、空のDataFrameを返す
         return pd.DataFrame(columns=['Rank', 'Combination', 'Total Score', 'Parts Count', 'MC Worst'])
     
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    df = df.sort_values('Rank', kind='stable').reset_index(drop=True)
+    return df
 
 
 def format_value(value: Optional[float]) -> str:
