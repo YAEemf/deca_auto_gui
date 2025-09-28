@@ -231,15 +231,15 @@ def create_sidebar():
         with st.expander(get_localized_text('weights', config) if config.language == 'jp' else 'Evaluation Weights'):
             col1, col2 = st.columns(2)
             with col1:
-                config.weight_max = st.slider("Max weight", 0.0, 2.0, config.weight_max, 0.05)
-                config.weight_area = st.slider("Area weight", 0.0, 2.0, config.weight_area, 0.05)
-                config.weight_mean = st.slider("Mean weight", 0.0, 2.0, config.weight_mean, 0.05)
-                config.weight_anti = st.slider("Anti-resonance weight", 0.0, 2.0, config.weight_anti, 0.05)
+                config.weight_max = st.slider("Max weight", 0.0, 1.0, config.weight_max, 0.05)
+                config.weight_area = st.slider("Area weight", 0.0, 1.0, config.weight_area, 0.05)
+                config.weight_mean = st.slider("Mean weight", 0.0, 1.0, config.weight_mean, 0.05)
+                config.weight_anti = st.slider("Anti-resonance weight", 0.0, 1.0, config.weight_anti, 0.05)
             with col2:
-                config.weight_flat = st.slider("Flatness weight", 0.0, 2.0, config.weight_flat, 0.05)
-                config.weight_under = st.slider("Under weight", -2.0, 2.0, config.weight_under, 0.05)
-                config.weight_parts = st.slider("Parts penalty weight", 0.0, 2.0, config.weight_parts, 0.05)
-                config.weight_mc_worst = st.slider("MC worst weight", 0.0, 2.0, config.weight_mc_worst, 0.05)
+                config.weight_flat = st.slider("Flatness weight", 0.0, 1.0, config.weight_flat, 0.05)
+                config.weight_under = st.slider("Under weight", -1.0, 1.0, config.weight_under, 0.05)
+                config.weight_parts = st.slider("Parts penalty weight", 0.0, 1.0, config.weight_parts, 0.05)
+                config.weight_mc_worst = st.slider("MC worst weight", 0.0, 1.0, config.weight_mc_worst, 0.05)
         
         # Monte Carlo設定
         with st.expander(get_localized_text('monte_carlo', config)):

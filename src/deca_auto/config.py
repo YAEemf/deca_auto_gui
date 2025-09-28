@@ -68,12 +68,15 @@ class UserConfig:
     
     # コンデンサリスト
     capacitors: List[Dict[str, Any]] = field(default_factory=lambda: [
+        {"name": "C_0603_1000p", "C": 1000e-12, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_0.01u", "C": 0.01e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_0.1u", "C": 0.1e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_1u", "C": 1e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_4.7u", "C": 4.7e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_1608_10u", "C": 10e-6, "ESR": 15e-3, "ESL": 0.8e-9},
         {"name": "C_2012_22u", "C": 22e-6, "ESR": 15e-3, "ESL": 1.0e-9},
         {"name": "C_Poly_100u", "C": 100e-6, "ESR": 100e-3, "ESL": 1.5e-9},
+        {"name": "C_Poly_330u", "C": 330e-6, "ESR": 100e-3, "ESL": 1.5e-9},
     ])
     
     # 探索設定
@@ -84,13 +87,13 @@ class UserConfig:
     buffer_limit: float = 1e6  # バッファサイズ上限
     
     # スコア重み
-    weight_max: float = 0.9
-    weight_area: float = 0.65
-    weight_mean: float = 0.5
-    weight_anti: float = 0.35
+    weight_max: float = 0.8
+    weight_area: float = 0.8
+    weight_mean: float = 0.45
+    weight_anti: float = 0.25
     weight_flat: float = 0.15
-    weight_under: float = -0.1
-    weight_parts: float = 0.0
+    weight_under: float = 0.1
+    weight_parts: float = 0.1
     weight_mc_worst: float = 1.0
     
     # Monte Carlo設定
