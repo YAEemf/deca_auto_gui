@@ -72,20 +72,20 @@ def generate_count_vectors(num_capacitors: int, max_total: int,
     """
     logger.info(f"組み合わせ生成: {num_capacitors}種類, 総数{min_total}～{max_total}個")
     
-    count_vectors = []
-    
-    # 各総数について組み合わせを生成
+    out = []
+
     for total in range(min_total, max_total + 1):
-        # itertools.combinations_with_replacementを使用
-        # 各コンデンサの個数の組み合わせを生成
-        for counts in itertools.combinations_with_replacement(range(total + 1), num_capacitors):
-            if sum(counts) == total:
-                count_vectors.append(counts)
+        N = total + num_capacitors - 1
+        # バー位置の全組合せ
+        for bars in itertools.combinations(range(N), num_capacitors - 1):
+            prev = -1
+            counts = []
+            for b in (*bars, N):
+                counts.append(b - prev - 1)
+                prev = b
+            out.append(tuple(counts))
     
-    # より効率的な方法：動的計画法ベース
-    # ただし、メモリ効率のため上記の方法を使用
-    
-    count_vectors = np.array(count_vectors, dtype=np.int32)
+    count_vectors = np.asarray(out, dtype=np.int32)
     logger.info(f"生成された組み合わせ数: {len(count_vectors)}")
     
     return count_vectors
@@ -385,7 +385,11 @@ def run_optimization(config: UserConfig,
         chunk_size_limit // bytes_per_combination,
         len(count_vectors)
     )
-    chunk_size = min(max_chunk_size, 10000)  # 最大10000組合せ/チャンク
+    max_chunk_size = max(1, min(
+    chunk_size_limit // bytes_per_combination,
+    len(count_vectors)
+    ))
+    chunk_size = max(1, min(max_chunk_size, 10000))
     
     logger.info(f"チャンクサイズ: {chunk_size} 組み合わせ/チャンク")
     
