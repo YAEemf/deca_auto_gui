@@ -150,13 +150,13 @@ def create_sidebar():
             if not st.session_state.optimization_running:
                 if st.button(get_localized_text('start_search', config), type="primary"):
                     start_optimization()
+                with col2:
+                    if not st.session_state.optimization_running:
+                        if st.button(get_localized_text('calculate_zc_only', config)):
+                            calculate_zc_only()
             else:
                 if st.button(get_localized_text('stop_search', config), type="secondary"):
                     stop_optimization()
-        
-        with col2:
-            if st.button(get_localized_text('calculate_zc_only', config)):
-                calculate_zc_only()
         
         st.divider()
         
@@ -513,6 +513,7 @@ def create_results_tab():
                         st.progress(1.0)
                     with col2:
                         st.success("✅ 最適化完了")
+                st.rerun()
                 break
             
             # 0.5秒待機
@@ -840,6 +841,7 @@ def stop_optimization():
     """最適化を停止"""
     st.session_state.optimization_running = False
     st.warning("停止リクエストを送信しました")
+    st.rerun()
 
 
 def calculate_zc_only():
@@ -949,6 +951,7 @@ def process_result_queue():
                     st.session_state.frequency_grid = results.get('frequency_grid')
                     st.session_state.target_mask = results.get('target_mask')
                 
+                logger.info("最適化完了")
                 st.success("最適化が完了しました")
                 
             elif data['type'] == 'error':
