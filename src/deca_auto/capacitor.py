@@ -119,7 +119,11 @@ def simulate_ac_impedance(model_path: Path, f_grid: np.ndarray,
             'Iac',
             circuit.gnd,  # negative
             n1,  # positive
-            dc_current=0@u_A,
+            dc_offset=dc_bias@u_A,
+            amplitude=1@u_A,
+            frequency=100@u_kHz,
+            delay=0@u_s,
+            damping_factor=0,
             ac_magnitude=1@u_A
         )
         
