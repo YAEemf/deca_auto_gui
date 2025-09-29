@@ -6,6 +6,7 @@
 import time
 import traceback
 import logging
+import sys
 from typing import Optional, Union, Any, Tuple
 from contextlib import contextmanager
 from functools import wraps
@@ -38,19 +39,24 @@ def setup_logger(name: str = "deca_auto", level: int = logging.INFO) -> logging.
     
     # ハンドラがない場合のみ追加
     if not logger.handlers:
-        # コンソールハンドラ
-        ch = logging.StreamHandler()
-        ch.setLevel(level)
-        
+        # コンソールハンドラ（stdout）
+        ch = logging.StreamHandler(stream=sys.stdout)
+        ch.setLevel(logging.NOTSET)
+
         # フォーマッタ
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         ch.setFormatter(formatter)
-        
+
         logger.addHandler(ch)
-    
+    else:
+        for handler in logger.handlers:
+            handler.setLevel(logging.NOTSET)
+
+    logger.propagate = False
+
     return logger
 
 
@@ -360,9 +366,10 @@ def decimate(data: np.ndarray, factor: int, axis: int = 0) -> np.ndarray:
 
 
 # 周波数グリッド生成
-def generate_frequency_grid(f_start: float, f_stop: float, 
+def generate_frequency_grid(f_start: float, f_stop: float,
                           num_points_per_decade: int,
-                          xp: Any = np) -> np.ndarray:
+                          xp: Any = np,
+                          dtype: Optional[Any] = None) -> np.ndarray:
     """
     対数スケールの周波数グリッドを生成
     
@@ -375,9 +382,12 @@ def generate_frequency_grid(f_start: float, f_stop: float,
     Returns:
         周波数グリッド
     """
-    num_decades = np.log10(f_stop / f_start)  # NumPyで計算
-    num_points = int(num_decades * num_points_per_decade)
-    return xp.logspace(np.log10(f_start), np.log10(f_stop), num_points)
+    num_decades = np.log10(f_stop / f_start)
+    num_points = max(2, int(np.ceil(num_decades * num_points_per_decade)))
+    grid = xp.logspace(np.log10(f_start), np.log10(f_stop), num_points)
+    if dtype is not None:
+        grid = grid.astype(dtype, copy=False)
+    return grid
 
 
 # 評価帯域のマスク生成
@@ -465,15 +475,14 @@ def memory_cleanup(xp: Any = None):
         yield
     finally:
         if xp is not None and xp is cp and CUPY_AVAILABLE:
-            # CuPyメモリプールのクリア
+            try:
+                cp.cuda.runtime.deviceSynchronize()
+            except Exception:
+                pass
             mempool = cp.get_default_memory_pool()
             pinned_mempool = cp.get_default_pinned_memory_pool()
             mempool.free_all_blocks()
             pinned_mempool.free_all_blocks()
-            
-            # ガベージコレクション
-            cp.cuda.MemoryPool().free_all_blocks()
-            
             logger.debug("GPUメモリをクリーンアップしました")
 
 

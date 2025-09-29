@@ -55,6 +55,7 @@ class OptimizationContext:
     top_k_results: List[Dict]
     stop_flag: bool = False
     gui_callback: Optional[Callable] = None
+    stop_event: Optional[Any] = None
 
 
 def generate_count_vectors(num_capacitors: int, max_total: int, 
@@ -134,6 +135,10 @@ def process_chunk(ctx: OptimizationContext,
         チャンクの処理結果
     """
     xp = ctx.xp
+
+    if ctx.stop_flag or (ctx.stop_event and ctx.stop_event.is_set()):
+        ctx.stop_flag = True
+        return {'chunk_id': chunk_id, 'top_k': [], 'num_processed': 0}
     
     # カウントベクトルをGPUに転送
     if ctx.is_gpu:
@@ -150,6 +155,10 @@ def process_chunk(ctx: OptimizationContext,
         ctx.config,
         xp
     )
+
+    if ctx.stop_event and ctx.stop_event.is_set():
+        ctx.stop_flag = True
+        return {'chunk_id': chunk_id, 'top_k': [], 'num_processed': len(count_vectors_chunk)}
     
     # スコア評価
     scores = evaluate_combinations(
@@ -158,8 +167,13 @@ def process_chunk(ctx: OptimizationContext,
         ctx.eval_mask,
         count_vectors_gpu,
         ctx.config,
-        xp
+        xp,
+        ctx.f_grid,
     )
+
+    if ctx.stop_event and ctx.stop_event.is_set():
+        ctx.stop_flag = True
+        return {'chunk_id': chunk_id, 'top_k': [], 'num_processed': len(count_vectors_chunk)}
     
     # チャンク内のtop_k抽出
     chunk_top_k = extract_top_k(
@@ -225,8 +239,9 @@ def update_global_top_k(global_top_k: List[Dict],
     return all_results[:k]
 
 
-def run_optimization(config: UserConfig, 
-                    gui_callback: Optional[Callable] = None) -> Dict:
+def run_optimization(config: UserConfig,
+                    gui_callback: Optional[Callable] = None,
+                    stop_event: Optional[Any] = None) -> Dict:
     """
     最適化処理のメイン実行関数
     
@@ -257,8 +272,8 @@ def run_optimization(config: UserConfig,
                        f"Free: {gpu_info['free_memory_gb']:.2f}GB")
     
     # データ型設定
-    dtype_c = get_dtype(config.dtype_c)
-    dtype_r = get_dtype(config.dtype_r)
+    dtype_c = np.dtype(get_dtype(config.dtype_c))
+    dtype_r = np.dtype(get_dtype(config.dtype_r))
     
     # VRAMバジェット決定
     vram_budget, chunk_size_limit = get_vram_budget(
@@ -274,7 +289,8 @@ def run_optimization(config: UserConfig,
             config.f_start,
             config.f_stop,
             config.num_points_per_decade,
-            xp
+            xp,
+            dtype_r,
         )
         logger.info(f"周波数点数: {len(f_grid)}")
     
@@ -303,7 +319,11 @@ def run_optimization(config: UserConfig,
     # コンデンサインピーダンス計算
     with Timer("コンデンサインピーダンス計算"):
         cap_impedances = calculate_all_capacitor_impedances(
-            config, f_grid, xp, gui_callback
+            config,
+            f_grid,
+            xp,
+            gui_callback,
+            dtype_c,
         )
         
         # GUIに周波数グリッドとターゲットマスクを送信
@@ -354,7 +374,8 @@ def run_optimization(config: UserConfig,
         capacitor_impedances=sorted_cap_impedances,
         capacitor_indices=xp.arange(len(sorted_cap_names)),
         top_k_results=[],
-        gui_callback=gui_callback
+        gui_callback=gui_callback,
+        stop_event=stop_event,
     )
     
     # カウントベクトル生成
@@ -377,21 +398,21 @@ def run_optimization(config: UserConfig,
         )
     
     # チャンクサイズ決定
-    bytes_per_combination = (
-        num_capacitors * 4 +  # カウントベクトル
-        len(f_grid) * 8  # 複素インピーダンス
+    bytes_per_combination = int(
+        num_capacitors * np.dtype(np.int32).itemsize +
+        len(f_grid) * dtype_c.itemsize +
+        len(f_grid) * dtype_r.itemsize
     )
-    max_chunk_size = min(
-        chunk_size_limit // bytes_per_combination,
-        len(count_vectors)
+    bytes_per_combination = max(bytes_per_combination, 1)
+    safety_margin = 1.2
+    effective_limit = int(ctx.chunk_size_limit / safety_margin)
+    raw_chunk = max(1, min(len(count_vectors), effective_limit // bytes_per_combination))
+    chunk_size = max(1, raw_chunk)
+    estimated_mem = chunk_size * bytes_per_combination / (1024 ** 2)
+
+    logger.info(
+        f"チャンクサイズ: {chunk_size} 組み合わせ/チャンク (推定使用メモリ: {estimated_mem:.2f} MB)"
     )
-    max_chunk_size = max(1, min(
-    chunk_size_limit // bytes_per_combination,
-    len(count_vectors)
-    ))
-    chunk_size = max(1, min(max_chunk_size, 10000))
-    
-    logger.info(f"チャンクサイズ: {chunk_size} 組み合わせ/チャンク")
     
     # 探索ループ
     num_chunks = (len(count_vectors) + chunk_size - 1) // chunk_size
@@ -406,11 +427,13 @@ def run_optimization(config: UserConfig,
     try:
         with memory_cleanup(xp):
             for chunk_id in progress:
+                if stop_event and stop_event.is_set():
+                    ctx.stop_flag = True
                 # 停止フラグチェック
                 if ctx.stop_flag:
                     logger.info("探索を停止しました")
                     break
-                
+
                 # チャンク取得
                 start_idx = chunk_id * chunk_size
                 end_idx = min(start_idx + chunk_size, len(count_vectors))
@@ -418,7 +441,13 @@ def run_optimization(config: UserConfig,
                 
                 # チャンク処理
                 chunk_results = process_chunk(ctx, chunk, chunk_id)
-                
+                if ctx.stop_event and ctx.stop_event.is_set():
+                    ctx.stop_flag = True
+
+                if ctx.stop_flag:
+                    logger.info("停止リクエストを検知したため探索を終了します")
+                    break
+
                 # グローバルtop_k更新
                 global_top_k = update_global_top_k(
                     global_top_k,
@@ -426,7 +455,7 @@ def run_optimization(config: UserConfig,
                     config.top_k
                 )
                 ctx.top_k_results = global_top_k
-                
+
                 # GUI更新コールバック
                 if gui_callback:
                     gui_callback({
@@ -443,13 +472,22 @@ def run_optimization(config: UserConfig,
                     best_score = global_top_k[0]['total_score'] if global_top_k else float('inf')
                     logger.info(f"進捗: {(chunk_id + 1) / num_chunks * 100:.1f}%, "
                                f"ベストスコア: {best_score:.6f}")
-    
+
     except KeyboardInterrupt:
         logger.info("探索が中断されました")
     except Exception as e:
         logger.error(f"探索エラー: {e}")
         traceback.print_exc()
-    
+
+    if ctx.is_gpu:
+        sorted_cap_impedances.clear()
+        ctx.capacitor_impedances = {}
+        try:
+            xp.get_default_memory_pool().free_all_blocks()
+            xp.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
+
     # 結果の整理
     results = {
         'top_k_results': global_top_k,
@@ -458,11 +496,12 @@ def run_optimization(config: UserConfig,
         'target_mask': transfer_to_device(target_mask, np),
         'config': config,
         'backend': backend_name,
-        'gpu_info': get_gpu_info(config.cuda) if is_gpu else None
+        'gpu_info': get_gpu_info(config.cuda) if is_gpu else None,
+        'stopped': bool(ctx.stop_flag)
     }
-    
+
     # Excel出力
-    if global_top_k:
+    if global_top_k and not ctx.stop_flag:
         with Timer("Excel出力"):
             export_to_excel(results, config)
     

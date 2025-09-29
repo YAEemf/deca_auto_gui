@@ -298,7 +298,8 @@ def estimate_capacitance_from_impedance(z_c: np.ndarray, f_grid: np.ndarray, xp:
 
 def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
                                         model_path: Path, dc_bias: float,
-                                        xp: Any = np, L_mntN: float = 0.5e-9) -> Tuple[np.ndarray, float]:
+                                        xp: Any = np, L_mntN: float = 0.5e-9,
+                                        dtype: Optional[Any] = None) -> Tuple[np.ndarray, float]:
     """
     単一コンデンサのインピーダンスを計算
     
@@ -365,13 +366,16 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
     
     # GPU転送（必要な場合）
     z_c = transfer_to_device(z_c, xp)
-    
+    if dtype is not None:
+        z_c = z_c.astype(dtype, copy=False)
+
     return z_c, capacitance
 
 
 def calculate_all_capacitor_impedances(config: UserConfig, f_grid: np.ndarray,
                                       xp: Any = np,
-                                      gui_callback: Optional[Callable] = None) -> Dict[str, np.ndarray]:
+                                      gui_callback: Optional[Callable] = None,
+                                      dtype: Optional[Any] = None) -> Dict[str, np.ndarray]:
     """
     全コンデンサのインピーダンスを計算
     
@@ -400,7 +404,13 @@ def calculate_all_capacitor_impedances(config: UserConfig, f_grid: np.ndarray,
         
         # インピーダンス計算
         z_c, capacitance = calculate_single_capacitor_impedance(
-            cap_config, f_grid, model_path, config.dc_bias, xp, config.L_mntN
+            cap_config,
+            f_grid,
+            model_path,
+            config.dc_bias,
+            xp,
+            config.L_mntN,
+            dtype,
         )
         
         capacitor_impedances[name] = z_c

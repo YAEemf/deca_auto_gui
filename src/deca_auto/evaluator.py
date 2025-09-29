@@ -9,118 +9,148 @@ import numpy as np
 
 # 絶対パスでインポート
 from deca_auto.config import UserConfig
-from deca_auto.utils import logger, transfer_to_device
+from deca_auto.utils import logger, transfer_to_device, safe_divide
 from deca_auto.pdn import calculate_pdn_impedance_monte_carlo
+
+
+def calculate_score_components_batch(
+    z_pdn_batch: Any,
+    target_curve: Any,
+    eval_mask: Any,
+    count_vectors: Any,
+    config: UserConfig,
+    xp: Any = np,
+    f_grid: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """バッチ処理版スコアコンポーネント計算"""
+
+    z_pdn_batch = xp.asarray(z_pdn_batch)
+    if z_pdn_batch.ndim == 1:
+        z_pdn_batch = z_pdn_batch[xp.newaxis, :]
+
+    count_vectors = xp.asarray(count_vectors)
+    if count_vectors.ndim == 1:
+        count_vectors = count_vectors[xp.newaxis, :]
+
+    if z_pdn_batch.shape[0] != count_vectors.shape[0]:
+        raise ValueError("z_pdn_batch と count_vectors のバッチ次元が一致しません")
+
+    eval_mask = xp.asarray(eval_mask, dtype=bool)
+    target_curve = xp.asarray(target_curve)
+    float_dtype = z_pdn_batch.real.dtype
+
+    freq_indices = xp.where(eval_mask)[0]
+    n_eval = freq_indices.size
+
+    total_parts = count_vectors.sum(axis=1)
+    score_parts = safe_divide(
+        total_parts.astype(float_dtype),
+        max(1, config.max_total_parts),
+        0.0,
+        xp,
+    )
+    score_parts = xp.minimum(score_parts, 1.0)
+
+    if n_eval == 0:
+        penalty = xp.full(z_pdn_batch.shape[0], 1.0, dtype=float_dtype)
+        zeros = xp.zeros_like(penalty)
+        return {
+            'max': penalty.copy(),
+            'area': penalty.copy(),
+            'mean': penalty.copy(),
+            'anti': penalty.copy(),
+            'flat': penalty.copy(),
+            'under': zeros,
+            'parts': score_parts,
+        }
+
+    z_eval = xp.abs(z_pdn_batch)[:, freq_indices]
+    t_eval = xp.maximum(target_curve[freq_indices], 1e-18)
+    ratio = z_eval / t_eval
+    ratio_clipped = xp.maximum(ratio, 1e-12)
+
+    if f_grid is None:
+        f_eval = xp.arange(n_eval, dtype=float) + 1.0
+    else:
+        f_eval = xp.asarray(f_grid)[freq_indices].astype(float)
+
+    score_max = xp.minimum(ratio_clipped.max(axis=1), 50.0)
+    score_mean_raw = ratio_clipped.mean(axis=1)
+    score_mean = xp.minimum(score_mean_raw, 50.0)
+
+    excess = xp.maximum(ratio_clipped - 1.0, 0.0)
+    if n_eval >= 2:
+        df_log = xp.log10(f_eval[1:] / f_eval[:-1])
+        df_log = xp.where(xp.isfinite(df_log) & (df_log > 0), df_log, 0.0)
+        traps = 0.5 * (excess[:, :-1] + excess[:, 1:]) * df_log
+        score_area = traps.sum(axis=1)
+        under_ratio = xp.maximum(1.0 - ratio_clipped, 0.0)
+        under_traps = 0.5 * (under_ratio[:, :-1] + under_ratio[:, 1:]) * df_log
+        score_under = under_traps.sum(axis=1)
+    else:
+        score_area = excess[:, 0]
+        score_under = xp.maximum(1.0 - ratio_clipped[:, 0], 0.0)
+
+    score_area = xp.minimum(score_area, 50.0)
+    score_under = xp.minimum(score_under, 50.0)
+
+    if n_eval > 2:
+        center = ratio_clipped[:, 1:-1]
+        peak_mask = (center > ratio_clipped[:, :-2]) & (center > ratio_clipped[:, 2:])
+        peak_vals = xp.where(peak_mask, center, 0.0)
+        peak_excess = xp.maximum(peak_vals - 1.0, 0.0)
+        peaks_count = xp.count_nonzero(peak_excess > 0.0, axis=1)
+        sum_peak = peak_excess.sum(axis=1)
+        avg_peak = safe_divide(sum_peak, xp.maximum(peaks_count, 1), 0.0, xp)
+        score_anti = peaks_count.astype(float_dtype) * avg_peak
+    else:
+        score_anti = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
+
+    score_anti = xp.minimum(score_anti, 50.0)
+
+    score_flat = safe_divide(
+        ratio_clipped.std(axis=1),
+        xp.maximum(score_mean_raw, 1e-12),
+        0.0,
+        xp,
+    )
+    score_flat = xp.minimum(score_flat, 10.0)
+
+    return {
+        'max': score_max.astype(float_dtype, copy=False),
+        'area': score_area.astype(float_dtype, copy=False),
+        'mean': score_mean.astype(float_dtype, copy=False),
+        'anti': score_anti.astype(float_dtype, copy=False),
+        'flat': score_flat.astype(float_dtype, copy=False),
+        'under': score_under.astype(float_dtype, copy=False),
+        'parts': score_parts.astype(float_dtype, copy=False),
+    }
 
 
 def calculate_score_components(
     z_pdn: np.ndarray,
-    target_curve: np.ndarray,   # target_mask という名前ですが実体は閾値カーブなので改名
+    target_curve: np.ndarray,
     eval_mask: np.ndarray,
     count_vector: np.ndarray,
     config: UserConfig,
     xp: Any = np,
     f_grid: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
-    """
-    スコアコンポーネント（比ベース, 対数周波数台形則）を計算
-    - 面積: r = |Z|/Zt の超過量 (r-1)+ を log10(f) 上で台形積分
-    - dB 指標を使いたい場合は excess_db を有効化
-    """
-    z_abs = xp.abs(z_pdn)
+    """単一組み合わせのスコアコンポーネント"""
 
-    # マスク適用
-    if eval_mask is None or eval_mask.dtype != bool:
-        raise ValueError("eval_mask は bool 配列である必要があります")
-    z_eval = z_abs[eval_mask]
-    t_eval = target_curve[eval_mask]
-
-    if f_grid is None:
-        # 既存互換: 等間隔とみなし Δlogf = 1 の重み（※非推奨）
-        f_eval = xp.arange(len(z_eval), dtype=float) + 1.0
-        warn_no_f = True
-    else:
-        f_eval = f_grid[eval_mask].astype(float)
-        warn_no_f = False
-
-    if len(z_eval) == 0:
-        # 何もない時は重ペナルティ
-        return {'max':1.0,'area':1.0,'mean':1.0,'anti':1.0,'flat':1.0,'under':0.0,'parts':1.0}
-
-    # 0 除算対策
-    t_eval = xp.maximum(t_eval, 1e-18)
-
-    # 比ベース
-    ratio = z_eval / t_eval         # r = |Z|/Zt
-    ratio_clipped = xp.maximum(ratio, 1e-12)
-
-    # ---- コンポーネント ----
-    # 1) 最大比
-    score_max = float(xp.max(ratio_clipped))
-
-    # 2) 面積（比超過）: (r-1)+ を log10(f) 上で台形積分
-    #    A = ∑ 0.5 * (e[i] + e[i+1]) * Δlog10(f[i->i+1])
-    excess = xp.maximum(ratio_clipped - 1.0, 0.0)
-    if len(excess) >= 2:
-        # Δlog10(f)
-        df_log = xp.log10(f_eval[1:] / f_eval[:-1])
-        # 非等間隔/単調性チェック
-        df_log = xp.where(xp.isfinite(df_log) & (df_log > 0), df_log, 0.0)
-        traps = 0.5 * (excess[:-1] + excess[1:]) * df_log
-        area_raw = xp.sum(traps)
-    else:
-        area_raw = excess[0] if len(excess) == 1 else 0.0
-    score_area = float(area_raw)
-
-    # 3) 平均比
-    score_mean = float(xp.mean(ratio_clipped))
-
-    # 4) アンチレゾナンスの強さ（超過ピークの数×高さの代表値）
-    anti = 0.0
-    if len(ratio_clipped) > 2:
-        is_peak = (ratio_clipped[1:-1] > ratio_clipped[:-2]) & (ratio_clipped[1:-1] > ratio_clipped[2:])
-        if xp is np:
-            peak_vals = ratio_clipped[1:-1][is_peak]
-        else:
-            idx = xp.where(is_peak)[0]
-            peak_vals = ratio_clipped[1:-1][idx] if len(idx) > 0 else xp.array([], dtype=ratio_clipped.dtype)
-        peak_excess = peak_vals[peak_vals > 1.0]
-        if len(peak_excess) > 0:
-            anti = float(len(peak_excess) * xp.mean(peak_excess - 1.0))
-    score_anti = anti
-
-    # 5) フラットネス（変動/平均）: 比ベースで評価
-    mu = xp.mean(ratio_clipped)
-    score_flat = float((xp.std(ratio_clipped) / mu) if mu > 0 else 0.0)
-
-    # 6) “under” は報酬（目標以下のマージン）
-    under_ratio = xp.maximum(1.0 - ratio_clipped, 0.0)
-    if len(under_ratio) >= 2:
-        df_log = xp.log10(f_eval[1:] / f_eval[:-1])
-        df_log = xp.where(xp.isfinite(df_log) & (df_log > 0), df_log, 0.0)
-        traps = 0.5 * (under_ratio[:-1] + under_ratio[1:]) * df_log
-        under_area = float(xp.sum(traps))
-    else:
-        under_area = float(under_ratio[0] if len(under_ratio) == 1 else 0.0)
-    # 正規化（スケール設定：小さくし過ぎない）
-    score_under = under_area  # ←後で合計スコアから減点する
-
-    # 7) 部品点数ペナルティ
-    total_parts = int(xp.sum(count_vector))
-    score_parts = float(total_parts / max(1, config.max_total_parts))
-
-    # クリップは必要最小限（過度に潰さない）
-    def soft_clip(x, hi):
-        return min(float(x), hi)
+    batch = calculate_score_components_batch(
+        z_pdn,
+        target_curve,
+        eval_mask,
+        count_vector,
+        config,
+        xp,
+        f_grid,
+    )
 
     return {
-        'max'  : soft_clip(score_max,  50.0),    # r の上限クリップ
-        'area' : soft_clip(score_area, 50.0),    # 面積の上限クリップ
-        'mean' : soft_clip(score_mean, 50.0),
-        'anti' : soft_clip(score_anti, 50.0),
-        'flat' : soft_clip(score_flat, 10.0),
-        'under': soft_clip(score_under, 50.0),
-        'parts': soft_clip(score_parts, 1.0),
+        key: float(transfer_to_device(val, np)[0])
+        for key, val in batch.items()
     }
 
 
@@ -136,33 +166,27 @@ def evaluate_combinations(
     """
     バッチ評価（小さいほど良い）。
     """
-    n_batch = len(z_pdn_batch)
-    scores = xp.zeros(n_batch, dtype=xp.float32)
+    comps = calculate_score_components_batch(
+        z_pdn_batch,
+        target_curve,
+        eval_mask,
+        count_vectors,
+        config,
+        xp,
+        f_grid,
+    )
 
-    for i in range(n_batch):
-        comp = calculate_score_components(
-            z_pdn=z_pdn_batch[i],
-            target_curve=target_curve,
-            eval_mask=eval_mask,
-            count_vector=count_vectors[i],
-            config=config,
-            xp=xp,
-            f_grid=f_grid,
-        )
+    total = (
+        config.weight_max   * comps['max'] +
+        config.weight_area  * comps['area'] +
+        config.weight_mean  * comps['mean'] +
+        config.weight_anti  * comps['anti'] +
+        config.weight_flat  * comps['flat'] +
+        config.weight_parts * comps['parts'] +
+        config.weight_under * comps['under']
+    )
 
-        total = (
-            config.weight_max  * comp['max']  +
-            config.weight_area * comp['area'] +
-            config.weight_mean * comp['mean'] +
-            config.weight_anti * comp['anti'] +
-            config.weight_flat * comp['flat'] +
-            config.weight_parts* comp['parts'] +
-            config.weight_under* comp['under']
-        )
-
-        scores[i] = float(total)
-
-    return scores
+    return total.astype(xp.float32, copy=False)
 
 
 def extract_top_k(z_pdn_batch: np.ndarray,
@@ -265,9 +289,10 @@ def monte_carlo_evaluation(top_k_results: List[Dict],
             eval_mask,
             xp.tile(count_vector[xp.newaxis, :], (config.mc_samples, 1)),
             config,
-            xp
+            xp,
+            f_grid,
         )
-        
+
         # 最悪値（最大スコア）を記録
         worst_score = float(xp.max(mc_scores))
         mc_worst_scores.append(worst_score)

@@ -193,7 +193,13 @@ def write_detail_sheet(worksheet, results: Dict, config: UserConfig,
         # スコアコンポーネント再計算
         z_pdn = ensure_numpy(result['z_pdn'])
         components = calculate_score_components(
-            z_pdn, target_mask, eval_mask, count_vec, config, np
+            z_pdn,
+            target_mask,
+            eval_mask,
+            count_vec,
+            config,
+            np,
+            f_grid=f_grid,
         )
         
         worksheet.write(row, 0, result.get('rank', i+1), cell_format)

@@ -1,4 +1,5 @@
 /src/deca_auto.egg-info
+/src/deca_auto/src/__pycache__
 *.pyc
 *.xlsx
 *.cir

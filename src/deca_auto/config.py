@@ -67,11 +67,22 @@ class UserConfig:
     
     # コンデンサリスト
     capacitors: List[Dict[str, Any]] = field(default_factory=lambda: [
+        {"name": "C_0603_0.01u", "C": 0.01e-6, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_0.022u", "C": 0.022e-6, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_0.033u", "C": 0.033e-6, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_0.047u", "C": 0.047e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_0.1u", "C": 0.1e-6, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_0.22u", "C": 0.22e-6, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_0.33u", "C": 0.33e-6, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_0.47u", "C": 0.47e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_1u", "C": 1e-6, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_2.2u", "C": 2.2e-6, "ESR": 15e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_3.3u", "C": 3.3e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_4.7u", "C": 4.7e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_1608_10u", "C": 10e-6, "ESR": 15e-3, "ESL": 0.8e-9},
         {"name": "C_2012_22u", "C": 22e-6, "ESR": 15e-3, "ESL": 1.0e-9},
+        {"name": "C_2012_33u", "C": 33e-6, "ESR": 15e-3, "ESL": 1.0e-9},
+        {"name": "C_2012_47u", "C": 47e-6, "ESR": 15e-3, "ESL": 1.0e-9},
         {"name": "C_Poly_100u", "C": 100e-6, "ESR": 100e-3, "ESL": 1.5e-9},
     ])
     
@@ -102,7 +113,7 @@ class UserConfig:
     
     # システム設定
     seed: int = 1234  # 乱数シード
-    max_vram_ratio_limit: float = 0.6  # VRAM使用率上限
+    max_vram_ratio_limit: float = 0.75  # VRAM使用率上限
     cuda: int = 0  # GPU番号
     dtype_c: str = "complex64"  # 複素数精度
     dtype_r: str = "float32"  # 実数精度
@@ -337,7 +348,7 @@ def validate_config(config: UserConfig) -> bool:
         
         # 探索設定の検証
         assert config.max_total_parts > 0, "最大総数は正の値である必要があります"
-        assert 0 < config.min_total_parts_ratio <= 1, "最小総数比率は0-1の範囲である必要があります"
+        assert config.min_total_parts_ratio <= 1, "最小総数比率は0-1の範囲である必要があります"
         assert config.top_k > 0, "上位候補数は正の値である必要があります"
         assert config.buffer_limit > 0, "バッファサイズは正の値である必要があります"
         

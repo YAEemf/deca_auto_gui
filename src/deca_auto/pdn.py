@@ -4,7 +4,7 @@ PDN合成モジュール
 """
 
 import traceback
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 
 # 絶対パスでインポート
@@ -12,8 +12,51 @@ from deca_auto.config import UserConfig
 from deca_auto.utils import logger, validate_result, safe_divide
 
 
+def _build_config_lookup(config: UserConfig) -> Dict[str, Dict[str, Any]]:
+    """コンデンサ名→設定辞書のルックアップを作成"""
+    return {cap['name']: cap for cap in config.capacitors}
+
+
+def _prepare_capacitor_arrays(
+    capacitor_impedances: Dict[str, np.ndarray],
+    config: UserConfig,
+    parasitic_elements: Dict[str, np.ndarray],
+    xp: Any,
+    omega: Optional[np.ndarray] = None,
+    dtype: Optional[Any] = None,
+) -> Tuple[Tuple[str, ...], Any, Any, Any]:
+    """ラダー計算用にコンデンサ関連配列を整形"""
+
+    cap_names: Tuple[str, ...] = tuple(capacitor_impedances.keys())
+    if not cap_names:
+        raise ValueError("コンデンサインピーダンス辞書が空です")
+
+    z_cap_array = xp.stack([capacitor_impedances[name] for name in cap_names])
+    if dtype is not None:
+        z_cap_array = z_cap_array.astype(dtype, copy=False)
+
+    # マウントインダクタンス配列を構築（個別指定があれば優先）
+    z_mnt_default = parasitic_elements['z_mntN']
+    if omega is None:
+        omega = parasitic_elements.get('omega')
+    if omega is None:
+        raise ValueError("omega が取得できませんでした")
+
+    config_map = _build_config_lookup(config)
+    z_mnt_array = xp.empty_like(z_cap_array)
+    for idx, name in enumerate(cap_names):
+        cap_cfg = config_map.get(name)
+        if cap_cfg and cap_cfg.get('L_mnt') is not None:
+            z_mnt_array[idx] = xp.asarray(1j * omega * cap_cfg['L_mnt'], dtype=z_cap_array.dtype)
+        else:
+            z_mnt_array[idx] = xp.asarray(z_mnt_default, dtype=z_cap_array.dtype)
+
+    return cap_names, z_cap_array, z_mnt_array, omega
+
+
 def calculate_pdn_parasitic_elements(f_grid: np.ndarray, config: UserConfig,
-                                    xp: Any = np) -> Dict[str, np.ndarray]:
+                                    xp: Any = np,
+                                    dtype: Optional[Any] = None) -> Dict[str, np.ndarray]:
     """
     PDN寄生成分のインピーダンス/アドミタンスを計算
     
@@ -55,6 +98,15 @@ def calculate_pdn_parasitic_elements(f_grid: np.ndarray, config: UserConfig,
     # デフォルト値
     z_mntN = 1j * omega * config.L_mntN
     
+    if dtype is not None:
+        target = np.dtype(dtype)
+        y_vrm = y_vrm.astype(target, copy=False)
+        z_v = z_v.astype(target, copy=False)
+        z_s = z_s.astype(target, copy=False)
+        z_sN = z_sN.astype(target, copy=False)
+        y_p = y_p.astype(target, copy=False)
+        z_mntN = z_mntN.astype(target, copy=False)
+
     return {
         'y_vrm': y_vrm,
         'z_v': z_v,
@@ -66,90 +118,88 @@ def calculate_pdn_parasitic_elements(f_grid: np.ndarray, config: UserConfig,
     }
 
 
+def _pdn_impedance_core(
+    count_vectors: Any,
+    z_cap_array: Any,
+    z_mnt_array: Any,
+    parasitic_elements: Dict[str, Any],
+    xp: Any,
+) -> Any:
+    """ラダー回路のPDNインピーダンスをバッチ計算"""
+
+    count_vectors = xp.asarray(count_vectors)
+    if count_vectors.ndim == 1:
+        count_vectors = count_vectors[xp.newaxis, :]
+
+    n_batch = count_vectors.shape[0]
+    z_cap_array = xp.asarray(z_cap_array)
+    z_mnt_array = xp.asarray(z_mnt_array)
+
+    if z_cap_array.ndim == 2:
+        z_cap_array = xp.broadcast_to(z_cap_array, (n_batch,) + z_cap_array.shape)
+    if z_mnt_array.ndim == 2:
+        z_mnt_array = xp.broadcast_to(z_mnt_array, (n_batch,) + z_mnt_array.shape)
+
+    if z_cap_array.shape[0] != n_batch or z_mnt_array.shape[0] != n_batch:
+        raise ValueError("コンデンサ配列とカウントベクトルのバッチ数が一致していません")
+
+    z_with_mount = z_cap_array + z_mnt_array
+    n_caps = z_with_mount.shape[1]
+
+    y_vrm = parasitic_elements['y_vrm']
+    y_total = xp.tile(y_vrm, (n_batch, 1))
+
+    for cap_idx in range(n_caps - 1, -1, -1):
+        idx = xp.where(count_vectors[:, cap_idx] > 0)[0]
+        if idx.size == 0:
+            continue
+
+        counts = count_vectors[idx, cap_idx].astype(z_with_mount.dtype, copy=False)
+        inv_z_cm = safe_divide(1.0, z_with_mount[idx, cap_idx, :], fill_value=0.0, xp=xp)
+        y_cm = counts[:, None] * inv_z_cm
+
+        z_series = parasitic_elements['z_sN'] + safe_divide(1.0, y_cm, fill_value=0.0, xp=xp)
+        y_total[idx] = y_total[idx] + safe_divide(1.0, z_series, fill_value=0.0, xp=xp)
+
+    y_with_planar = y_total + parasitic_elements['y_p']
+    z_after_spreading = parasitic_elements['z_s'] + safe_divide(1.0, y_with_planar, fill_value=0.0, xp=xp)
+    z_pdn = parasitic_elements['z_v'] + z_after_spreading
+
+    return z_pdn
+
+
 def assemble_pdn_ladder(count_vector: np.ndarray,
                        capacitor_impedances: Dict[str, np.ndarray],
                        capacitor_indices: np.ndarray,
                        parasitic_elements: Dict[str, np.ndarray],
                        config: UserConfig,
                        xp: Any = np) -> np.ndarray:
-    """
-    PDNラダー回路を組み立ててZ_pdnを計算（単一の組み合わせ）
-    
-    測定ノード(Load) -> Z_v -> Z_s -> Y_p -> Σ(Z_sN, Y_cmN) -> Y_vrm
-    
-    Args:
-        count_vector: コンデンサ個数ベクトル
-        capacitor_impedances: コンデンサインピーダンス辞書
-        capacitor_indices: コンデンサインデックス
-        parasitic_elements: 寄生成分辞書
-        config: ユーザー設定
-        xp: バックエンドモジュール
-    
-    Returns:
-        Z_pdn: PDNインピーダンス
-    """
-    
-    # 寄生成分取得
-    y_vrm = parasitic_elements['y_vrm']
-    z_v = parasitic_elements['z_v']
-    z_s = parasitic_elements['z_s']
-    z_sN = parasitic_elements['z_sN']
-    y_p = parasitic_elements['y_p']
-    z_mntN = parasitic_elements['z_mntN']
-    
-    # VRMから開始（アドミタンス）
-    y_total = y_vrm
-    
-    # 周波数点数から推定（parasitic_elementsはすべて同じ長さ）
-    n_freq = len(y_vrm)
-    
-    # コンデンサラダーを逆順で構築（VRM側から測定ノード側へ）
-    # 容量の大きい順（VRM側）から小さい順（測定ノード側）へ
-    cap_names = list(capacitor_impedances.keys())
-    
-    for i in reversed(range(len(cap_names))):
-        n_caps = count_vector[i]
-        
-        if n_caps > 0:
-            # このコンデンサのインピーダンス
-            z_c = capacitor_impedances[cap_names[i]]
-            
-            # マウントインダクタンスを追加
-            # 各コンデンサ固有のL_mntがある場合はそれを使用
-            cap_config = next((c for c in config.capacitors if c['name'] == cap_names[i]), None)
-            if cap_config and cap_config.get('L_mnt') is not None:
-                # omegaを取得
-                omega = parasitic_elements.get('omega')
-                if omega is not None:
-                    z_mnt_custom = 1j * omega * cap_config['L_mnt']
-                    z_cm = z_c + z_mnt_custom
-                else:
-                    # フォールバック：z_mntNから逆算
-                    omega_L_mntN = xp.imag(z_mntN)
-                    omega = omega_L_mntN / config.L_mntN if config.L_mntN > 0 else xp.zeros_like(z_c)
-                    z_mnt_custom = 1j * omega * cap_config['L_mnt']
-                    z_cm = z_c + z_mnt_custom
-            else:
-                z_cm = z_c + z_mntN
-            
-            # コンデンサのアドミタンス（並列接続）
-            y_cm = n_caps / z_cm
-            
-            # spreading抵抗・インダクタンスを直列追加してから並列合成
-            # Z -> Y変換: Y_total = Y_total + 1/(Z_sN + 1/Y_cm)
-            z_series = z_sN + 1.0 / y_cm
-            y_total = y_total + 1.0 / z_series
-    
-    # プレーナ容量を並列追加
-    y_with_planar = y_total + y_p
-    
-    # spreading抵抗・インダクタンスを直列追加
-    z_after_spreading = z_s + 1.0 / y_with_planar
-    
-    # via抵抗・インダクタンスを直列追加
-    z_pdn = z_v + z_after_spreading
-    
-    return z_pdn
+    """PDNラダー回路を組み立ててZ_pdnを計算（単一の組み合わせ）"""
+
+    try:
+        omega = parasitic_elements.get('omega')
+        sample_dtype = next(iter(capacitor_impedances.values())).dtype
+        cap_names, z_cap_array, z_mnt_array, _ = _prepare_capacitor_arrays(
+            capacitor_impedances,
+            config,
+            parasitic_elements,
+            xp,
+            omega,
+            sample_dtype,
+        )
+        _ = cap_names  # 順序保持（測定ノード側が小容量）の確認用
+        z_pdn_batch = _pdn_impedance_core(
+            count_vector,
+            z_cap_array,
+            z_mnt_array,
+            parasitic_elements,
+            xp,
+        )
+        return z_pdn_batch[0]
+    except Exception as exc:
+        logger.error(f"PDNラダー計算エラー: {exc}")
+        traceback.print_exc()
+        raise
 
 
 def calculate_pdn_impedance_batch(count_vectors: np.ndarray,
@@ -172,72 +222,29 @@ def calculate_pdn_impedance_batch(count_vectors: np.ndarray,
     Returns:
         Z_pdn配列 (N_batch, N_freq)
     """
-    n_batch = len(count_vectors)
-    n_freq = len(f_grid)
-    n_caps = len(capacitor_impedances)
-    
-    # 寄生成分を事前計算
-    parasitic_elements = calculate_pdn_parasitic_elements(f_grid, config, xp)
-    
-    # 結果配列
-    z_pdn_batch = xp.zeros((n_batch, n_freq), dtype=xp.complex64)
-    
-    # バッチ処理
-    # GPU最適化: ベクトル化可能な部分を分離
-    
-    # コンデンサインピーダンスを配列に変換
-    cap_names = list(capacitor_impedances.keys())
-    z_cap_array = xp.stack([capacitor_impedances[name] for name in cap_names])  # (N_caps, N_freq)
-    
-    # マウントインダクタンス配列
-    omega = parasitic_elements.get('omega', 2 * xp.pi * f_grid)
-    z_mnt_array = xp.zeros_like(z_cap_array)
-    for i, name in enumerate(cap_names):
-        cap_config = next((c for c in config.capacitors if c['name'] == name), None)
-        if cap_config and cap_config.get('L_mnt') is not None:
-            z_mnt_array[i] = 1j * omega * cap_config['L_mnt']
-        else:
-            z_mnt_array[i] = parasitic_elements['z_mntN']
-    
-    # 各バッチで計算
-    for batch_idx in range(n_batch):
-        count_vec = count_vectors[batch_idx]
-        
-        # VRMアドミタンスから開始
-        y_total = parasitic_elements['y_vrm'].copy()
-        
-        # コンデンサラダーの構築（ベクトル化）
-        for cap_idx in reversed(range(n_caps)):
-            n_caps_i = count_vec[cap_idx]
-            
-            if n_caps_i > 0:
-                # インピーダンス取得
-                z_c = z_cap_array[cap_idx]
-                z_mnt = z_mnt_array[cap_idx]
-                z_cm = z_c + z_mnt
-                
-                # 並列アドミタンス
-                y_cm = n_caps_i / z_cm
-                
-                # spreading込みで並列合成
-                z_series = parasitic_elements['z_sN'] + 1.0 / y_cm
-                y_total = y_total + 1.0 / z_series
-        
-        # プレーナ容量
-        y_with_planar = y_total + parasitic_elements['y_p']
-        
-        # spreading
-        z_after_spreading = parasitic_elements['z_s'] + 1.0 / y_with_planar
-        
-        # via
-        z_pdn = parasitic_elements['z_v'] + z_after_spreading
-        
-        z_pdn_batch[batch_idx] = z_pdn
-    
-    # 検証
+    target_dtype = np.dtype(getattr(config, 'dtype_c', 'complex64'))
+    parasitic_elements = calculate_pdn_parasitic_elements(f_grid, config, xp, target_dtype)
+    cap_names, z_cap_array, z_mnt_array, _ = _prepare_capacitor_arrays(
+        capacitor_impedances,
+        config,
+        parasitic_elements,
+        xp,
+        parasitic_elements.get('omega', 2 * xp.pi * f_grid),
+        target_dtype,
+    )
+    _ = cap_names  # 順序維持の意図を明示
+
+    z_pdn_batch = _pdn_impedance_core(
+        count_vectors,
+        z_cap_array,
+        z_mnt_array,
+        parasitic_elements,
+        xp,
+    ).astype(z_cap_array.dtype, copy=False)
+
     if not validate_result(z_pdn_batch, "PDNインピーダンス"):
         logger.error("PDNインピーダンス計算で異常値を検出")
-    
+
     return z_pdn_batch
 
 
@@ -263,86 +270,54 @@ def calculate_pdn_impedance_monte_carlo(count_vector: np.ndarray,
     Returns:
         Z_pdn_mc配列 (n_samples, n_freq)
     """
-    n_freq = len(f_grid)
     n_caps = len(capacitor_impedances)
-    
-    # 乱数生成器（CuPyとNumPyで分岐）
+
+    if n_samples <= 0:
+        return xp.zeros((0, len(f_grid)), dtype=xp.asarray(f_grid).dtype)
+
     if xp is np:
         rng = np.random.default_rng(config.seed)
+        normal = rng.normal
     else:
-        # CuPyの場合
         rng = xp.random.RandomState(config.seed)
-    
-    # 結果配列
-    z_pdn_mc = xp.zeros((n_samples, n_freq), dtype=xp.complex64)
-    
-    # コンデンサインピーダンスを配列化
-    cap_names = list(capacitor_impedances.keys())
-    z_cap_base = xp.stack([capacitor_impedances[name] for name in cap_names])
-    
-    # 寄生成分（固定）
-    parasitic_elements = calculate_pdn_parasitic_elements(f_grid, config, xp)
-    omega = parasitic_elements.get('omega', 2 * xp.pi * f_grid)
-    
-    for sample_idx in range(n_samples):
-        # コンデンサパラメータのばらつき生成
-        # 容量: ±tol_C * (1 - mlcc_derating)
-        # ESR: ±tol_ESR
-        # ESL: ±tol_ESL
-        
-        # ばらつき係数（正規分布、3σで公差範囲）
-        if xp is np:
-            c_variation = rng.normal(1.0, config.tol_C/3, n_caps)
-            esr_variation = rng.normal(1.0, config.tol_ESR/3, n_caps)
-            esl_variation = rng.normal(1.0, config.tol_ESL/3, n_caps)
-        else:
-            # CuPyの場合
-            c_variation = rng.normal(1.0, config.tol_C/3, n_caps, dtype=xp.float32)
-            esr_variation = rng.normal(1.0, config.tol_ESR/3, n_caps, dtype=xp.float32)
-            esl_variation = rng.normal(1.0, config.tol_ESL/3, n_caps, dtype=xp.float32)
-        
-        c_variation = xp.clip(c_variation, 1-config.tol_C, 1+config.tol_C)
-        esr_variation = xp.clip(esr_variation, 1-config.tol_ESR, 1+config.tol_ESR)
-        esl_variation = xp.clip(esl_variation, 1-config.tol_ESL, 1+config.tol_ESL)
-        
-        # MLCCディレーティングを適用
-        c_variation = c_variation * (1 - config.mlcc_derating)
-        
-        # インピーダンスにばらつきを適用
-        # Z = ESR + jωL - j/(ωC) の関係から
-        omega = 2 * xp.pi * f_grid
-        z_cap_varied = xp.zeros_like(z_cap_base)
-        
-        for cap_idx in range(n_caps):
-            # 元のインピーダンスから各成分を推定（簡易的）
-            z_orig = z_cap_base[cap_idx]
-            
-            # RLC成分の分離（近似）
-            esr_orig = xp.real(z_orig).mean()  # 実部の平均をESRと仮定
-            
-            # 虚部から L と C を推定
-            z_imag = xp.imag(z_orig)
-            # 低周波で容量性、高周波で誘導性と仮定
-            mid_idx = len(f_grid) // 2
-            
-            # ばらつきを適用（簡易モデル）
-            esr_new = esr_orig * esr_variation[cap_idx]
-            
-            # 虚部にもばらつきを適用
-            z_imag_new = z_imag * xp.sqrt(c_variation[cap_idx] * esl_variation[cap_idx])
-            
-            z_cap_varied[cap_idx] = esr_new + 1j * z_imag_new
-        
-        # PDN計算（ばらつきを含む）
-        z_pdn_sample = assemble_pdn_ladder(
-            count_vector,
-            {name: z_cap_varied[i] for i, name in enumerate(cap_names)},
-            capacitor_indices,
-            parasitic_elements,
-            config,
-            xp
-        )
-        
-        z_pdn_mc[sample_idx] = z_pdn_sample
-    
-    return z_pdn_mc
+        normal = lambda loc, scale, size: rng.normal(loc, scale, size=size, dtype=xp.float32)
+
+    target_dtype = np.dtype(getattr(config, 'dtype_c', 'complex64'))
+    parasitic_elements = calculate_pdn_parasitic_elements(f_grid, config, xp, target_dtype)
+    _, z_cap_base, z_mnt_array, _ = _prepare_capacitor_arrays(
+        capacitor_impedances,
+        config,
+        parasitic_elements,
+        xp,
+        parasitic_elements.get('omega'),
+        target_dtype,
+    )
+
+    esr_orig = xp.mean(xp.real(z_cap_base), axis=1)
+    z_imag_base = xp.imag(z_cap_base)
+
+    shape = (n_samples, n_caps)
+    float_dtype = z_cap_base.real.dtype
+    c_variation = xp.clip(normal(1.0, config.tol_C / 3, shape), 1 - config.tol_C, 1 + config.tol_C).astype(float_dtype, copy=False)
+    esr_variation = xp.clip(normal(1.0, config.tol_ESR / 3, shape), 1 - config.tol_ESR, 1 + config.tol_ESR).astype(float_dtype, copy=False)
+    esl_variation = xp.clip(normal(1.0, config.tol_ESL / 3, shape), 1 - config.tol_ESL, 1 + config.tol_ESL).astype(float_dtype, copy=False)
+
+    c_variation = c_variation * (1 - config.mlcc_derating)
+
+    esr_new = esr_orig[None, :] * esr_variation
+    imag_scale = xp.sqrt(c_variation * esl_variation)
+    z_imag_new = imag_scale[:, :, None] * z_imag_base[None, :, :]
+    z_cap_varied = esr_new[:, :, None] + 1j * z_imag_new
+
+    count_vector = xp.asarray(count_vector)
+    count_vectors_mc = xp.broadcast_to(count_vector, (n_samples, count_vector.size))
+
+    z_pdn_mc = _pdn_impedance_core(
+        count_vectors_mc,
+        z_cap_varied,
+        z_mnt_array,
+        parasitic_elements,
+        xp,
+    )
+
+    return z_pdn_mc.astype(z_cap_base.dtype, copy=False)

@@ -8,8 +8,10 @@ from typing import List, Optional
 import traceback
 
 # 絶対パスでインポート
+import numpy as np
+
 from deca_auto.config import load_config, USER_CONFIG
-from deca_auto.utils import logger
+from deca_auto.utils import logger, generate_frequency_grid, get_dtype
 from deca_auto.main import run_optimization
 
 
@@ -188,7 +190,20 @@ def main():
                     logger.info("--no-searchが指定されたため、Z_c計算のみ実行します")
                     # Z_c計算のみ実行する処理を追加
                     from deca_auto.capacitor import calculate_all_capacitor_impedances
-                    calculate_all_capacitor_impedances(config)
+                    f_grid = generate_frequency_grid(
+                        config.f_start,
+                        config.f_stop,
+                        config.num_points_per_decade,
+                        np,
+                        dtype=get_dtype(config.dtype_r),
+                    )
+                    calculate_all_capacitor_impedances(
+                        config,
+                        f_grid,
+                        np,
+                        None,
+                        get_dtype(config.dtype_c),
+                    )
                 
         except KeyboardInterrupt:
             logger.info("処理を中断しました")

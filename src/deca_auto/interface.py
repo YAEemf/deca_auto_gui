@@ -71,18 +71,24 @@ def initialize_session_state():
     
     if 'progress_value' not in st.session_state:
         st.session_state.progress_value = 0.0
-    
+
     if 'no_search_mode' not in st.session_state:
         st.session_state.no_search_mode = os.environ.get('DECA_NO_SEARCH', '0') == '1'
-    
+
     if 'active_tab' not in st.session_state:
         st.session_state.active_tab = 0  # 0: Settings, 1: Results
     
     if 'file_upload_key' not in st.session_state:
         st.session_state.file_upload_key = 0  # ファイルアップローダーのキー
-    
+
     if 'last_uploaded_file' not in st.session_state:
         st.session_state.last_uploaded_file = None  # 前回のアップロードファイル名
+
+    if 'stop_event' not in st.session_state:
+        st.session_state.stop_event = None
+
+    if 'stop_requested' not in st.session_state:
+        st.session_state.stop_requested = False
 
 
 def create_sidebar():
@@ -157,6 +163,9 @@ def create_sidebar():
             else:
                 if st.button(get_localized_text('stop_search', config), type="secondary"):
                     stop_optimization()
+
+        if st.session_state.stop_requested:
+            st.info("停止処理中です…")
         
         st.divider()
         
@@ -841,7 +850,7 @@ def save_current_config(filename: Optional[str] = None):
         logger.error(f"設定保存エラー: {e}")
 
 
-def optimization_worker(config: UserConfig, result_queue: queue.Queue):
+def optimization_worker(config: UserConfig, result_queue: queue.Queue, stop_event: Optional[threading.Event] = None):
     """最適化処理のワーカースレッド"""
     try:
         def gui_callback(data: Dict):
@@ -849,7 +858,7 @@ def optimization_worker(config: UserConfig, result_queue: queue.Queue):
             result_queue.put(data)
         
         # 最適化実行
-        results = run_optimization(config, gui_callback)
+        results = run_optimization(config, gui_callback, stop_event)
         
         # 完了通知（結果を含める）
         result_queue.put({
@@ -888,11 +897,14 @@ def start_optimization():
             st.session_state.result_queue.get_nowait()
         except:
             break
-    
+
+    st.session_state.stop_event = threading.Event()
+    st.session_state.stop_requested = False
+
     # ワーカースレッド開始
     thread = threading.Thread(
         target=optimization_worker,
-        args=(st.session_state.config, st.session_state.result_queue),
+        args=(st.session_state.config, st.session_state.result_queue, st.session_state.stop_event),
         daemon=True
     )
     thread.start()
@@ -906,10 +918,13 @@ def start_optimization():
 
 def stop_optimization():
     """最適化を停止"""
-    st.session_state.optimization_running = False
-    st.session_state.progress_value = 0.0
-    st.warning("停止リクエストを送信しました")
-    st.rerun()
+    event = st.session_state.get('stop_event')
+    if event is not None and not event.is_set():
+        event.set()
+        st.session_state.stop_requested = True
+        st.warning("停止リクエストを送信しました")
+    else:
+        st.info("停止処理中です…")
 
 
 def calculate_zc_only():
@@ -1009,8 +1024,13 @@ def process_result_queue():
             elif data['type'] == 'complete':
                 # 完了
                 st.session_state.optimization_running = False
-                st.session_state.progress_value = 1.0
-                
+                stopped = False
+                if 'results' in data and data['results'] is not None:
+                    stopped = data['results'].get('stopped', False)
+                st.session_state.progress_value = 0.0 if stopped else 1.0
+                st.session_state.stop_event = None
+                st.session_state.stop_requested = False
+
                 # 結果データの更新
                 if 'results' in data:
                     results = data['results']
@@ -1018,14 +1038,20 @@ def process_result_queue():
                     st.session_state.capacitor_names = results.get('capacitor_names', [])
                     st.session_state.frequency_grid = results.get('frequency_grid')
                     st.session_state.target_mask = results.get('target_mask')
-                
-                logger.info("最適化完了")
-                st.success("最適化が完了しました")
-                
+
+                if stopped:
+                    logger.info("探索停止処理が完了しました")
+                    st.info("探索を停止しました")
+                else:
+                    logger.info("最適化完了")
+                    st.success("最適化が完了しました")
+
             elif data['type'] == 'error':
                 # エラー
                 st.session_state.optimization_running = False
                 st.session_state.progress_value = 0.0
+                st.session_state.stop_event = None
+                st.session_state.stop_requested = False
                 st.error(f"エラー: {data['message']}")
         
         return processed
