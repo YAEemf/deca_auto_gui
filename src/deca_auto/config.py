@@ -42,7 +42,7 @@ class UserConfig:
             (1e3, 10e-3),
             (5e3, 10e-3),
             (2e4, 8e-3),
-            (5e4, 8e-3),
+            (3e5, 8e-3),
             (2e6, 25e-3),
             (1e8, 1.3e0),
         ]
@@ -87,13 +87,13 @@ class UserConfig:
     buffer_limit: float = 1e6  # バッファサイズ上限
     
     # スコア重み
-    weight_max: float = 0.8
-    weight_area: float = 0.8
-    weight_mean: float = 0.45
-    weight_anti: float = 0.25
-    weight_flat: float = 0.15
-    weight_under: float = 0.1
-    weight_parts: float = 0.1
+    weight_max: float = 0.2
+    weight_area: float = 1.0
+    weight_mean: float = 0.3
+    weight_anti: float = 0.4
+    weight_flat: float = 0.2
+    weight_under: float = 0.0
+    weight_parts: float = 0.0
     weight_mc_worst: float = 1.0
     
     # Monte Carlo設定
@@ -392,22 +392,25 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "settings": "設定",
             "results": "結果",
             "capacitor_list": "コンデンサリスト",
+            "update_caplist":"コンデンサリストを更新",
+            "apply_change":"変更を適用",
             "target_mask": "目標マスク",
+            "update_mask":"目標マスクを更新",
             "frequency_grid": "周波数グリッド",
             "evaluation_band": "評価帯域",
             "search_settings": "探索設定",
             "monte_carlo": "Monte Carlo設定",
             "gpu_settings": "GPU設定",
             "weights": "評価重み",
-            "apply_settings": "設定を適用",
             "calculate_zc_only": "Z_cのみ計算",
             "use_custom_mask": "カスタムマスクを使用",
+            "load_file":"📁 ファイル",
             "save": "保存",
             "save_as": "名前を付けて保存",
             "load_config": "設定ファイルを読み込む",
             "drop_config": "設定ファイルをここにドロップ",
             "system":"システム",
-            "language": "Language",
+            "language": "言語",
             "theme": "テーマ",
         },
         "en": {
@@ -417,22 +420,25 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "settings": "Settings",
             "results": "Results",
             "capacitor_list": "Capacitor List",
+            "update_caplist":"Updated the capacitor list",
+            "apply_change":"Apply Changes",
             "target_mask": "Target Mask",
+            "update_mask":"Updated the custom mask",
             "frequency_grid": "Frequency Grid",
             "evaluation_band": "Evaluation Band",
             "search_settings": "Search Settings",
             "monte_carlo": "Monte Carlo Settings",
             "gpu_settings": "GPU Settings",
             "weights": "Evaluation Weights",
-            "apply_settings": "Apply Settings",
             "calculate_zc_only": "Calculate Z_c Only",
             "use_custom_mask": "Use Custom Mask",
+            "load_file":"📁 File Utility",
             "save": "Save",
             "save_as": "Save As",
             "load_config": "Load Config File",
             "drop_config": "Drop config file here",
             "system":"system",
-            "language": "言語",
+            "language": "Language",
             "theme": "theme",
         }
     }

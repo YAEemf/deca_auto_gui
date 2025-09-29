@@ -93,7 +93,7 @@ def create_sidebar():
         st.title(get_localized_text('title', config))
         
         # ファイル操作
-        st.header("📁 ファイル操作")
+        st.header(get_localized_text("load_file", config))
         
         # ファイルアップロード
         uploaded_file = st.file_uploader(
@@ -297,27 +297,33 @@ def create_sidebar():
                     step=0.1
                 )
 
-        with st.expander(get_localized_text('system', config)):
-            # Language: jp / en
-            lang = st.selectbox(
-                get_localized_text('language', config),
-                options=["日本語", "English"],
-            )
-            if lang == "日本語":
-                config.language = "jp"
-            elif lang == "English":
-                config.language = "en"
-            # elif lang == "汉语":
-            #     config.language = "zh"
-            else:
-                config.language = "jp"
+        def _on_change_language():
+            sel = st.session_state["_lang_display"]
+            st.session_state.config.language = "jp" if sel == "日本語" else "en"
 
-            # Theme: Dark / Light
-            theme_choice = st.selectbox(
-                get_localized_text('theme', config),
-                options=["Light Theme", "Dark Theme"],
+        # def _on_change_theme():
+        #     sel = st.session_state["_theme_display"]
+        #     st.session_state.config.dark_theme = (sel == "Dark Theme")
+
+        with st.expander(get_localized_text('system', st.session_state.config)):
+            current_lang_display = "日本語" if st.session_state.config.language == "jp" else "English"
+            lang = st.selectbox(
+                get_localized_text('language', st.session_state.config),
+                options=["日本語", "English"],
+                index=["日本語", "English"].index(current_lang_display),   # 現在のGUI言語を既定表示に
+                key="_lang_display",
+                on_change=_on_change_language
             )
-            config.dark_theme = (theme_choice == "Dark Theme")
+
+            # current_theme_display = "Dark Theme" if getattr(st.session_state.config, "dark_theme", False) else "Light Theme"
+
+            # theme_choice = st.selectbox(
+            #     get_localized_text('theme', st.session_state.config),
+            #     options=["Light Theme", "Dark Theme"],
+            #     index=["Light Theme", "Dark Theme"].index(current_theme_display),  # 現在適用中のテーマ名を既定表示に
+            #     key="_theme_display",
+            #     on_change=_on_change_theme
+            # )
 
 
 def create_main_content():
@@ -343,7 +349,7 @@ def create_settings_tab():
     """設定タブの内容"""
     config = st.session_state.config
     
-    st.header(get_localized_text('settings', config))
+    # st.header(get_localized_text('settings', config))
     
     # コンデンサリスト
     st.subheader(get_localized_text('capacitor_list', config))
@@ -371,7 +377,7 @@ def create_settings_tab():
     )
     
     # 編集内容を反映
-    if st.button("コンデンサリストを更新"):
+    if st.button(get_localized_text("update_caplist", config)):
         new_caps = []
         for _, row in edited_df.iterrows():
             cap = {
@@ -385,7 +391,7 @@ def create_settings_tab():
             # 空のL_mntはNoneのままにする（デフォルト値はcapacitor.pyで処理）
             new_caps.append(cap)
         config.capacitors = new_caps
-        st.success("コンデンサリストを更新しました")
+        st.success(get_localized_text("update_caplist", config))
     
     st.divider()
     
@@ -438,7 +444,7 @@ def create_settings_tab():
             key="mask_editor"
         )
         
-        if st.button("マスクを更新"):
+        if st.button(get_localized_text("update_mask", config)):
             if len(edited_mask) > 0:
                 mask_points = []
                 for _, row in edited_mask.iterrows():
@@ -467,7 +473,7 @@ def create_results_tab():
     """結果タブの内容"""
     config = st.session_state.config
     
-    st.header(get_localized_text('results', config))
+    # st.header(get_localized_text('results', config))
     
     # 最適化実行中の場合、自動更新を有効化
     if st.session_state.optimization_running:
@@ -881,6 +887,7 @@ def start_optimization():
 def stop_optimization():
     """最適化を停止"""
     st.session_state.optimization_running = False
+    st.session_state.progress_value = 0.0
     st.warning("停止リクエストを送信しました")
     st.rerun()
 
