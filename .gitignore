@@ -1,3 +1,5 @@
 /src/deca_auto.egg-info
 *.pyc
 *.xlsx
+*.cir
+*.mod

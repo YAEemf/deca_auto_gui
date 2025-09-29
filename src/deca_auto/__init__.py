@@ -1,5 +1,5 @@
 __version__ = "1.0.0"
-__author__ = "PDN Team"
+__author__ = "YAE"
 
 from deca_auto.config import UserConfig, load_config, save_config
 from deca_auto.utils import get_backend, setup_logger
