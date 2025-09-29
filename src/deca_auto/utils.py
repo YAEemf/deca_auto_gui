@@ -41,7 +41,7 @@ def setup_logger(name: str = "deca_auto", level: int = logging.INFO) -> logging.
     if not logger.handlers:
         # コンソールハンドラ（stdout）
         ch = logging.StreamHandler(stream=sys.stdout)
-        ch.setLevel(logging.NOTSET)
+        ch.setLevel(level)
 
         # フォーマッタ
         formatter = logging.Formatter(
@@ -53,7 +53,7 @@ def setup_logger(name: str = "deca_auto", level: int = logging.INFO) -> logging.
         logger.addHandler(ch)
     else:
         for handler in logger.handlers:
-            handler.setLevel(logging.NOTSET)
+            handler.setLevel(level)
 
     logger.propagate = False
 
@@ -62,6 +62,13 @@ def setup_logger(name: str = "deca_auto", level: int = logging.INFO) -> logging.
 
 # グローバルロガー
 logger = setup_logger()
+
+
+def set_log_level(level: int):
+    """ロガーと既存ハンドラのレベルを更新"""
+    logger.setLevel(level)
+    for handler in logger.handlers:
+        handler.setLevel(level)
 
 
 # バックエンド決定

@@ -231,12 +231,15 @@ def update_global_top_k(global_top_k: List[Dict],
     """
     # チャンク結果をグローバルに追加
     all_results = global_top_k + chunk_results['top_k']
-    
+
     # スコアでソート
     all_results.sort(key=lambda x: x['total_score'])
-    
-    # 上位k個を保持
-    return all_results[:k]
+
+    # 上位k個を保持し、順位を再採番
+    top_k = all_results[:k]
+    for idx, result in enumerate(top_k, start=1):
+        result['rank'] = idx
+    return top_k
 
 
 def run_optimization(config: UserConfig,

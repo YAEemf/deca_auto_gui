@@ -9,9 +9,10 @@ import traceback
 
 # 絶対パスでインポート
 import numpy as np
+import logging
 
 from deca_auto.config import load_config, USER_CONFIG
-from deca_auto.utils import logger, generate_frequency_grid, get_dtype
+from deca_auto.utils import logger, generate_frequency_grid, get_dtype, set_log_level
 from deca_auto.main import run_optimization
 
 
@@ -134,7 +135,9 @@ def main():
     
     # ロギングレベル設定
     if args.verbose:
-        logger.setLevel("DEBUG")
+        set_log_level(logging.DEBUG)
+    else:
+        set_log_level(logging.INFO)
     
     # 設定ファイルの読み込み
     configs = []
