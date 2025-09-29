@@ -291,46 +291,50 @@ def timed(func):
 
 
 # 対数補間
-def log_interpolate(x: np.ndarray, xp: np.ndarray, fp: np.ndarray, 
-                   backend: Any = np) -> np.ndarray:
+def log_interpolate(x: np.ndarray, xp: np.ndarray, fp: np.ndarray, backend: Any = np) -> np.ndarray:
     """
-    対数スケールでの補間
-    
-    Args:
-        x: 補間点
-        xp: 既知のx座標
-        fp: 既知のy座標  
-        backend: バックエンドモジュール
-    
-    Returns:
-        補間値
+    対数スケール補間：常にNumPyで安全に実行し、必要ならbackendに戻す
     """
-    # NumPy配列に変換（interp はCuPy未対応の可能性）
-    if backend is not np and CUPY_AVAILABLE:
-        # CuPyの場合、NumPyで補間してからCuPyに戻す
-        x_np = ensure_numpy(x)
-        xp_np = ensure_numpy(xp) 
-        fp_np = ensure_numpy(fp)
-        
-        log_x = np.log10(x_np)
-        log_xp = np.log10(xp_np)
-        log_fp = np.log10(np.abs(fp_np))
-        
-        log_interp = np.interp(log_x, log_xp, log_fp)
-        sign = np.sign(np.interp(x_np, xp_np, fp_np))
-        result = sign * (10.0 ** log_interp)
-        
-        # CuPyに戻す
-        return backend.asarray(result)
-    else:
-        # NumPyの場合
-        log_x = backend.log10(x)
-        log_xp = backend.log10(xp)
-        log_fp = backend.log10(backend.abs(fp))
-        
-        log_interp = backend.interp(log_x, log_xp, log_fp)
-        sign = backend.sign(backend.interp(x, xp, fp))
-        return sign * (10.0 ** log_interp)
+    # まずCPU側に統一
+    x_np  = ensure_numpy(x)
+    xp_np = ensure_numpy(xp)
+    fp_np = ensure_numpy(fp)
+
+    # xpは単調増加・1次元に正規化
+    xp_np = np.asarray(xp_np).ravel()
+    fp_np = np.asarray(fp_np).ravel()
+    x_np  = np.asarray(x_np).ravel()
+
+    # xpの重複除去（np.interp要件対応）
+    sort_idx = np.argsort(xp_np)
+    xp_np = xp_np[sort_idx]
+    fp_np = fp_np[sort_idx]
+    uniq_mask = np.concatenate([[True], xp_np[1:] > xp_np[:-1]])
+    xp_np = xp_np[uniq_mask]
+    fp_np = fp_np[uniq_mask]
+
+    # ゼロ・符号対策（対数補間は|fp|を使用し符号は別に保持）
+    eps = 1e-300
+    mag = np.maximum(np.abs(fp_np), eps)
+    sign_src = np.sign(fp_np)
+
+    log_x  = np.log10(np.maximum(x_np, eps))
+    log_xp = np.log10(np.maximum(xp_np, eps))
+    log_mag= np.log10(mag)
+
+    # 安全にNumPy補間
+    log_interp = np.interp(log_x, log_xp, log_mag)
+
+    # 元の符号は周波数線形軸で補間（エッジで±1が暴れないよう外挿は端値保持）
+    sign_lin = np.interp(x_np, xp_np, sign_src, left=sign_src[0], right=sign_src[-1])
+    sign_lin = np.where(sign_lin >= 0, 1.0, -1.0)
+
+    result = sign_lin * (10.0 ** log_interp)
+
+    # backendに戻す
+    if backend is not np:
+        return transfer_to_device(result, backend)
+    return result
 
 
 # データのdecimate（間引き）

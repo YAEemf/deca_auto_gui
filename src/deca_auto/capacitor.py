@@ -119,8 +119,8 @@ def simulate_ac_impedance(model_path: Path, f_grid: np.ndarray,
             'Iac',
             circuit.gnd,  # negative
             n1,  # positive
-            dc_offset=dc_bias@u_A,
-            amplitude=1@u_A,
+            # dc_offset=dc_bias@u_A,
+            # amplitude=1@u_A,
             frequency=100@u_kHz,
             delay=0@u_s,
             damping_factor=0,
@@ -137,6 +137,7 @@ def simulate_ac_impedance(model_path: Path, f_grid: np.ndarray,
         
         # シミュレータ作成
         simulator = circuit.simulator(temperature=25, nominal_temperature=25)
+        simulator.save(["all", f"v({n1})"])
         
         # AC解析
         # 周波数点を対数スケールで設定
@@ -269,44 +270,30 @@ def calculate_rlc_impedance(cap_config: Dict, f_grid: np.ndarray,
     return z_c
 
 
-def estimate_capacitance_from_impedance(z_c: np.ndarray, f_grid: np.ndarray,
-                                       xp: Any = np) -> float:
+def estimate_rlc_by_least_squares(z_c: np.ndarray, f_grid: np.ndarray) -> Tuple[float, float, float]:
     """
-    インピーダンスから容量を推定（最小2乗フィット）
-    
-    Args:
-        z_c: 複素インピーダンス
-        f_grid: 周波数グリッド
-        xp: バックエンドモジュール
-    
-    Returns:
-        推定容量値 [F]
+    直列RLCのESR, L, Cを最小二乗で推定
     """
-    # NumPyに変換して処理（安定性のため）
-    if xp is not np:
-        z_c = ensure_numpy(z_c)
-        f_grid = ensure_numpy(f_grid)
-    
-    omega = 2 * np.pi * f_grid
-    
-    # 虚部から容量成分を抽出
-    # Im(Z) ≈ ω*L - 1/(ω*C) の低周波領域で -1/(ω*C) が支配的
-    # 低周波領域（最初の1/3）を使用
-    n_low = len(f_grid) // 3
-    omega_low = omega[:n_low]
-    z_imag_low = np.imag(z_c[:n_low])
-    
-    # 最小2乗フィット: C = -1 / (ω * Im(Z))の平均
-    # ただし、Im(Z) < 0 の領域のみ使用（容量性領域）
-    mask = z_imag_low < 0
-    if np.any(mask):
-        c_estimates = -1 / (omega_low[mask] * z_imag_low[mask])
-        c_estimated = float(np.median(c_estimates))
-    else:
-        # フォールバック：全体から推定
-        c_estimated = 1e-6  # デフォルト値
-    
-    return c_estimated
+    z = ensure_numpy(z_c)
+    f = ensure_numpy(f_grid)
+    w = 2*np.pi*f
+
+    # 実部→ESR（定数項の中央値 または最小二乗の定数項）
+    esr = float(np.median(np.real(z)))
+
+    # 虚部 ≈ L*ω + (1/C)*(-1/ω) を最小二乗
+    y = np.imag(z) - np.median(np.imag(z[(len(z)//10):(len(z)//2)]))*0.0  # バイアス不要
+    X = np.vstack([w, -1.0/np.maximum(w, 1e-300)]).T
+    theta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    L_est, invC_est = theta
+    C_est = float(1.0/np.maximum(invC_est, 1e-300))
+    L_est = float(L_est)
+    return esr, L_est, C_est
+
+# 既存の estimate_capacitance_from_impedance の置換／呼び出し側差し替え
+def estimate_capacitance_from_impedance(z_c: np.ndarray, f_grid: np.ndarray, xp: Any = np) -> float:
+    _, _, C = estimate_rlc_by_least_squares(z_c, f_grid)
+    return C
 
 
 def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
@@ -349,6 +336,12 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
                 z_fitted = apply_vector_fitting(z_samples, f_grid)
                 if z_fitted is not None:
                     z_c = z_fitted
+                    try:
+                        cap_config['ESR'] = 0.0
+                        cap_config['ESL'] = 0.0
+                        logger.debug(f"{name}: SPICE AC成功のためESR/ESL=0を適用（デフォルト不使用）")
+                    except Exception as _:
+                        pass
                     logger.info(f"{name}: SPICEモデル + VectorFitting成功")
                 else:
                     z_c = z_samples

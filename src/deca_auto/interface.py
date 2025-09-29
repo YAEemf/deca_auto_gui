@@ -353,21 +353,32 @@ def create_settings_tab():
     
     # コンデンサリスト
     st.subheader(get_localized_text('capacitor_list', config))
-    
+
     # データフレーム作成
     cap_data = []
     for cap in config.capacitors:
+        path = cap.get('path', "")
+        # path が None または空文字列なら初期値を使う
+        if path is None or path == "":
+            c = cap.get('C', 0.0)
+            esr = cap.get('ESR', 15e-3)
+            esl = cap.get('ESL', 0.5e-9)
+        else:
+            # path が定義されているなら、もし cap に ESR/ESL の値があればそれを使い、なければ None（空表示）にする
+            c = cap.get('C', 0)
+            esr = cap.get('ESR', 0)
+            esl = cap.get('ESL', 0)
         cap_data.append({
             'Name': cap.get('name', ''),
-            'Path': cap.get('path', ''),
-            'C [F]': format_value(cap.get('C', 0)),
-            'ESR [Ω]': format_value(cap.get('ESR', 15e-3)),
-            'ESL [H]': format_value(cap.get('ESL', 0.5e-9)),
+            'Path': path or '',
+            'C [F]': format_value(c),
+            'ESR [Ω]': format_value(esr),
+            'ESL [H]': format_value(esl),
             'L_mnt [H]': format_value(cap.get('L_mnt', config.L_mntN))
         })
-    
+
     df = pd.DataFrame(cap_data)
-    
+
     # 編集可能なデータエディタ
     edited_df = st.data_editor(
         df,
@@ -375,24 +386,33 @@ def create_settings_tab():
         use_container_width=True,
         key="capacitor_editor"
     )
-    
+
     # 編集内容を反映
     if st.button(get_localized_text("update_caplist", config)):
         new_caps = []
         for _, row in edited_df.iterrows():
+            path_val = row['Path'] if row['Path'] else None
+            # path_val が None の場合のみ ESR／ESL にデフォルト値
+            if path_val is None:
+                esr_val = parse_value(row['ESR [Ω]'], 15e-3)
+                esl_val = parse_value(row['ESL [H]'], 0.5e-9)
+            else:
+                # path があれば、空入力なら None に、入力あればその値にする
+                esr_val = parse_value(row['ESR [Ω]'], 0)
+                esl_val = parse_value(row['ESL [H]'], 0)
             cap = {
                 'name': row['Name'],
-                'path': row['Path'] if row['Path'] else None,
-                'C': parse_value(row['C [F]'], None),
-                'ESR': parse_value(row['ESR [Ω]'], 15e-3),
-                'ESL': parse_value(row['ESL [H]'], 0.5e-9),
-                'L_mnt': parse_value(row['L_mnt [H]'], None)
+                'path': path_val,
+                'C': parse_value(row['C [F]'], 0),
+                'ESR': esr_val,
+                'ESL': esl_val,
+                'L_mnt': parse_value(row['L_mnt [H]'], config.L_mntN)
             }
-            # 空のL_mntはNoneのままにする（デフォルト値はcapacitor.pyで処理）
             new_caps.append(cap)
         config.capacitors = new_caps
         st.success(get_localized_text("update_caplist", config))
-    
+
+    # 以下略
     st.divider()
     
     # 目標マスク設定

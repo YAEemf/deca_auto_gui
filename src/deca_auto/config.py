@@ -15,11 +15,11 @@ import numpy as np
 class CapacitorConfig:
     """コンデンサ設定"""
     name: str
-    path: Optional[str] = None  # SPICEモデルパス
-    C: Optional[float] = None  # 容量値 [F]
+    path: Optional[str] = ""  # SPICEモデルパス
+    C: Optional[float] = 0  # 容量値 [F]
     ESR: float = 15e-3  # 等価直列抵抗 [Ω]
     ESL: float = 0.5e-9  # 等価直列インダクタンス [H]
-    L_mnt: Optional[float] = None  # マウントインダクタンス [H]
+    L_mnt: Optional[float] = 0.5e-9  # マウントインダクタンス [H]
 
 
 @dataclass
@@ -331,8 +331,9 @@ def validate_config(config: UserConfig) -> bool:
         assert len(config.capacitors) > 0, "コンデンサリストが空です"
         for i, cap in enumerate(config.capacitors):
             assert "name" in cap, f"コンデンサ[{i}]に名前がありません"
-            if "C" in cap:
-                assert cap["C"] > 0, f"コンデンサ[{i}]の容量は正の値である必要があります"
+            if "path" not in cap:
+                if "C" in cap:
+                    assert cap["C"] > 0, f"コンデンサ[{i}]の容量は正の値である必要があります"
         
         # 探索設定の検証
         assert config.max_total_parts > 0, "最大総数は正の値である必要があります"
