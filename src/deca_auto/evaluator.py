@@ -13,165 +13,155 @@ from deca_auto.utils import logger, transfer_to_device
 from deca_auto.pdn import calculate_pdn_impedance_monte_carlo
 
 
-def calculate_score_components(z_pdn: np.ndarray,
-                              target_mask: np.ndarray,
-                              eval_mask: np.ndarray,
-                              count_vector: np.ndarray,
-                              config: UserConfig,
-                              xp: Any = np) -> Dict[str, float]:
+def calculate_score_components(
+    z_pdn: np.ndarray,
+    target_curve: np.ndarray,   # target_mask という名前ですが実体は閾値カーブなので改名
+    eval_mask: np.ndarray,
+    count_vector: np.ndarray,
+    config: UserConfig,
+    xp: Any = np,
+    f_grid: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
     """
-    スコアコンポーネントを計算
-    
-    Args:
-        z_pdn: PDNインピーダンス (複素数)
-        target_mask: 目標マスク
-        eval_mask: 評価帯域マスク
-        count_vector: コンデンサカウントベクトル
-        config: ユーザー設定
-        xp: バックエンドモジュール
-    
-    Returns:
-        スコアコンポーネントの辞書
+    スコアコンポーネント（比ベース, 対数周波数台形則）を計算
+    - 面積: r = |Z|/Zt の超過量 (r-1)+ を log10(f) 上で台形積分
+    - dB 指標を使いたい場合は excess_db を有効化
     """
-    # 絶対値
     z_abs = xp.abs(z_pdn)
-    
-    # 評価帯域内のみ
+
+    # マスク適用
+    if eval_mask is None or eval_mask.dtype != bool:
+        raise ValueError("eval_mask は bool 配列である必要があります")
     z_eval = z_abs[eval_mask]
-    target_eval = target_mask[eval_mask]
-    
+    t_eval = target_curve[eval_mask]
+
+    if f_grid is None:
+        # 既存互換: 等間隔とみなし Δlogf = 1 の重み（※非推奨）
+        f_eval = xp.arange(len(z_eval), dtype=float) + 1.0
+        warn_no_f = True
+    else:
+        f_eval = f_grid[eval_mask].astype(float)
+        warn_no_f = False
+
     if len(z_eval) == 0:
-        logger.warning("評価帯域内にデータがありません")
-        return {
-            'max': 1.0,  # ペナルティとして高い値
-            'area': 1.0,
-            'mean': 1.0,
-            'anti': 1.0,
-            'flat': 1.0,
-            'under': 0.0,
-            'parts': 0.0
-        }
-    
-    # 1. 最大値 (正規化: target の倍数)
-    score_max = float(xp.max(z_eval) / xp.mean(target_eval))
-    
-    # 2. 目標マスクに対する超過面積（対数スケールで台形積分）
-    excess = xp.maximum(z_eval - target_eval, 0)
-    # 対数スケールでの積分のため、周波数の対数差分を重みとする
-    freq_eval = xp.arange(len(z_eval))  # 簡易的にインデックスを使用
-    if len(freq_eval) > 1:
-        log_weights = xp.ones(len(freq_eval))
-        # 対数差分の近似（ゼロ除算を回避）
-        log_weights[1:] = xp.log10(freq_eval[1:] / xp.maximum(freq_eval[:-1], 0.1) + 1)
-        score_area = float(xp.sum(excess * log_weights))
+        # 何もない時は重ペナルティ
+        return {'max':1.0,'area':1.0,'mean':1.0,'anti':1.0,'flat':1.0,'under':0.0,'parts':1.0}
+
+    # 0 除算対策
+    t_eval = xp.maximum(t_eval, 1e-18)
+
+    # 比ベース
+    ratio = z_eval / t_eval         # r = |Z|/Zt
+    ratio_clipped = xp.maximum(ratio, 1e-12)
+
+    # ---- コンポーネント ----
+    # 1) 最大比
+    score_max = float(xp.max(ratio_clipped))
+
+    # 2) 面積（比超過）: (r-1)+ を log10(f) 上で台形積分
+    #    A = ∑ 0.5 * (e[i] + e[i+1]) * Δlog10(f[i->i+1])
+    excess = xp.maximum(ratio_clipped - 1.0, 0.0)
+    if len(excess) >= 2:
+        # Δlog10(f)
+        df_log = xp.log10(f_eval[1:] / f_eval[:-1])
+        # 非等間隔/単調性チェック
+        df_log = xp.where(xp.isfinite(df_log) & (df_log > 0), df_log, 0.0)
+        traps = 0.5 * (excess[:-1] + excess[1:]) * df_log
+        area_raw = xp.sum(traps)
     else:
-        score_area = float(excess[0] if len(excess) > 0 else 0)
-    
-    # 3. 平均値 (正規化)
-    score_mean = float(xp.mean(z_eval) / xp.mean(target_eval))
-    
-    # 4. アンチレゾナンス（ピーク検出）
-    # ローカルピークの検出（簡易版）
-    if len(z_eval) > 2:
-        # ピーク検出（前後より大きい点）
-        is_peak = (z_eval[1:-1] > z_eval[:-2]) & (z_eval[1:-1] > z_eval[2:])
+        area_raw = excess[0] if len(excess) == 1 else 0.0
+    score_area = float(area_raw)
+
+    # 3) 平均比
+    score_mean = float(xp.mean(ratio_clipped))
+
+    # 4) アンチレゾナンスの強さ（超過ピークの数×高さの代表値）
+    anti = 0.0
+    if len(ratio_clipped) > 2:
+        is_peak = (ratio_clipped[1:-1] > ratio_clipped[:-2]) & (ratio_clipped[1:-1] > ratio_clipped[2:])
         if xp is np:
-            # NumPyの場合
-            peak_heights = z_eval[1:-1][is_peak]
-            # 目標を超えるピークの抽出
-            target_mid = target_eval[1:-1][is_peak]
-            excess_peaks = peak_heights[peak_heights > target_mid]
+            peak_vals = ratio_clipped[1:-1][is_peak]
         else:
-            # CuPyの場合（ブールインデックスが異なる可能性）
-            peak_indices = xp.where(is_peak)[0]
-            if len(peak_indices) > 0:
-                peak_heights = z_eval[1:-1][peak_indices]
-                target_mid = target_eval[1:-1][peak_indices]
-                excess_mask = peak_heights > target_mid
-                excess_peaks = peak_heights[excess_mask]
-            else:
-                excess_peaks = xp.array([])
-        
-        if len(excess_peaks) > 0:
-            score_anti = float(len(excess_peaks) * xp.mean(excess_peaks) / xp.mean(target_eval))
-        else:
-            score_anti = 0.0
+            idx = xp.where(is_peak)[0]
+            peak_vals = ratio_clipped[1:-1][idx] if len(idx) > 0 else xp.array([], dtype=ratio_clipped.dtype)
+        peak_excess = peak_vals[peak_vals > 1.0]
+        if len(peak_excess) > 0:
+            anti = float(len(peak_excess) * xp.mean(peak_excess - 1.0))
+    score_anti = anti
+
+    # 5) フラットネス（変動/平均）: 比ベースで評価
+    mu = xp.mean(ratio_clipped)
+    score_flat = float((xp.std(ratio_clipped) / mu) if mu > 0 else 0.0)
+
+    # 6) “under” は報酬（目標以下のマージン）
+    under_ratio = xp.maximum(1.0 - ratio_clipped, 0.0)
+    if len(under_ratio) >= 2:
+        df_log = xp.log10(f_eval[1:] / f_eval[:-1])
+        df_log = xp.where(xp.isfinite(df_log) & (df_log > 0), df_log, 0.0)
+        traps = 0.5 * (under_ratio[:-1] + under_ratio[1:]) * df_log
+        under_area = float(xp.sum(traps))
     else:
-        score_anti = 0.0
-    
-    # 5. フラットネス（標準偏差/平均）
-    score_flat = float(xp.std(z_eval) / xp.mean(z_eval))
-    
-    # 6. 余裕面積（目標を下回る面積、負のスコア）
-    under = xp.maximum(target_eval - z_eval, 0)
-    score_under = float(xp.sum(under))
-    
-    # 7. 部品点数ペナルティ
+        under_area = float(under_ratio[0] if len(under_ratio) == 1 else 0.0)
+    # 正規化（スケール設定：小さくし過ぎない）
+    score_under = under_area  # ←後で合計スコアから減点する
+
+    # 7) 部品点数ペナルティ
     total_parts = int(xp.sum(count_vector))
-    score_parts = float(total_parts / config.max_total_parts)
-    
-    # 正規化（0-1範囲）
-    scores = {
-        'max': min(score_max, 10.0) / 10.0,  # 10倍を上限
-        'area': min(score_area, 100.0) / 100.0,  # 適切な正規化
-        'mean': min(score_mean, 10.0) / 10.0,
-        'anti': min(score_anti, 10.0) / 10.0,
-        'flat': min(score_flat, 1.0),  # すでに0-1範囲
-        'under': min(score_under, 100.0) / 100.0,
-        'parts': score_parts  # すでに0-1範囲
+    score_parts = float(total_parts / max(1, config.max_total_parts))
+
+    # クリップは必要最小限（過度に潰さない）
+    def soft_clip(x, hi):
+        return min(float(x), hi)
+
+    return {
+        'max'  : soft_clip(score_max,  50.0),    # r の上限クリップ
+        'area' : soft_clip(score_area, 50.0),    # 面積の上限クリップ
+        'mean' : soft_clip(score_mean, 50.0),
+        'anti' : soft_clip(score_anti, 50.0),
+        'flat' : soft_clip(score_flat, 10.0),
+        'under': soft_clip(score_under, 50.0),
+        'parts': soft_clip(score_parts, 1.0),
     }
-    
-    return scores
 
 
-def evaluate_combinations(z_pdn_batch: np.ndarray,
-                         target_mask: np.ndarray,
-                         eval_mask: np.ndarray,
-                         count_vectors: np.ndarray,
-                         config: UserConfig,
-                         xp: Any = np) -> np.ndarray:
+def evaluate_combinations(
+    z_pdn_batch: np.ndarray,
+    target_curve: np.ndarray,
+    eval_mask: np.ndarray,
+    count_vectors: np.ndarray,
+    config: UserConfig,
+    xp: Any = np,
+    f_grid: Optional[np.ndarray] = None,
+) -> np.ndarray:
     """
-    組み合わせのバッチ評価
-    
-    Args:
-        z_pdn_batch: PDNインピーダンスバッチ (N_batch, N_freq)
-        target_mask: 目標マスク
-        eval_mask: 評価帯域マスク
-        count_vectors: カウントベクトル (N_batch, N_caps)
-        config: ユーザー設定
-        xp: バックエンドモジュール
-    
-    Returns:
-        スコア配列 (N_batch,)
+    バッチ評価（小さいほど良い）。
     """
     n_batch = len(z_pdn_batch)
     scores = xp.zeros(n_batch, dtype=xp.float32)
-    
-    # バッチ処理
+
     for i in range(n_batch):
-        # 各コンポーネント計算
-        components = calculate_score_components(
-            z_pdn_batch[i],
-            target_mask,
-            eval_mask,
-            count_vectors[i],
-            config,
-            xp
+        comp = calculate_score_components(
+            z_pdn=z_pdn_batch[i],
+            target_curve=target_curve,
+            eval_mask=eval_mask,
+            count_vector=count_vectors[i],
+            config=config,
+            xp=xp,
+            f_grid=f_grid,
         )
-        
-        # 重み付き線形結合
-        total_score = (
-            config.weight_max * components['max'] +
-            config.weight_area * components['area'] +
-            config.weight_mean * components['mean'] +
-            config.weight_anti * components['anti'] +
-            config.weight_flat * components['flat'] +
-            config.weight_under * components['under'] +
-            config.weight_parts * components['parts']
+
+        total = (
+            config.weight_max  * comp['max']  +
+            config.weight_area * comp['area'] +
+            config.weight_mean * comp['mean'] +
+            config.weight_anti * comp['anti'] +
+            config.weight_flat * comp['flat'] +
+            config.weight_parts* comp['parts'] +
+            config.weight_under* comp['under']
         )
-        
-        scores[i] = total_score
-    
+
+        scores[i] = float(total)
+
     return scores
 
 

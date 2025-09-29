@@ -42,8 +42,7 @@ class UserConfig:
             (1e3, 10e-3),
             (5e3, 10e-3),
             (2e4, 8e-3),
-            (3e5, 8e-3),
-            (2e6, 25e-3),
+            (6e5, 8e-3),
             (1e8, 1.3e0),
         ]
     )  # カスタムマスク [(freq, impedance), ...]
@@ -58,7 +57,7 @@ class UserConfig:
     L_s: float = 1e-9  # spreadingインダクタンス [H]
     R_v: float = 0.5e-3  # via抵抗 [Ω]
     L_v: float = 1e-9  # viaインダクタンス [H]
-    R_p: float = 5e-3  # プレーナ抵抗 [Ω]
+    R_p: float = 10e-3  # プレーナ抵抗 [Ω]
     C_p: float = 10e-12  # プレーナ容量 [F]
     tan_delta_p: float = 0.02  # 誘電正接
     
@@ -68,32 +67,29 @@ class UserConfig:
     
     # コンデンサリスト
     capacitors: List[Dict[str, Any]] = field(default_factory=lambda: [
-        {"name": "C_0603_1000p", "C": 1000e-12, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_0.01u", "C": 0.01e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_0.1u", "C": 0.1e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_1u", "C": 1e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_4.7u", "C": 4.7e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_1608_10u", "C": 10e-6, "ESR": 15e-3, "ESL": 0.8e-9},
         {"name": "C_2012_22u", "C": 22e-6, "ESR": 15e-3, "ESL": 1.0e-9},
         {"name": "C_Poly_100u", "C": 100e-6, "ESR": 100e-3, "ESL": 1.5e-9},
-        {"name": "C_Poly_330u", "C": 330e-6, "ESR": 100e-3, "ESL": 1.5e-9},
     ])
     
     # 探索設定
-    max_total_parts: int = 16  # コンデンサ総数上限
-    min_total_parts_ratio: float = 0.3  # 最小総数比率
+    max_total_parts: int = 12  # コンデンサ総数上限
+    min_total_parts_ratio: float = 0.5  # 最小総数比率
     top_k: int = 10  # 上位候補数
     shuffle_evaluation: bool = True  # 評価順のシャッフル
-    buffer_limit: float = 1e6  # バッファサイズ上限
+    buffer_limit: float = 10e6  # バッファサイズ上限
     
     # スコア重み
     weight_max: float = 0.2
     weight_area: float = 1.0
-    weight_mean: float = 0.3
-    weight_anti: float = 0.4
+    weight_mean: float = 0.35
+    weight_anti: float = 0.2
     weight_flat: float = 0.2
     weight_under: float = 0.0
-    weight_parts: float = 0.0
+    weight_parts: float = 0.1
     weight_mc_worst: float = 1.0
     
     # Monte Carlo設定
@@ -106,7 +102,7 @@ class UserConfig:
     
     # システム設定
     seed: int = 1234  # 乱数シード
-    max_vram_ratio_limit: float = 0.5  # VRAM使用率上限
+    max_vram_ratio_limit: float = 0.6  # VRAM使用率上限
     cuda: int = 0  # GPU番号
     dtype_c: str = "complex64"  # 複素数精度
     dtype_r: str = "float32"  # 実数精度
@@ -386,7 +382,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
     """
     texts = {
         "jp": {
-            "title": "PDNインピーダンス最適化ツール",
+            "title": "Deca Auto【PDN自動最適化ツール】",
             "start_search": "探索開始",
             "stop_search": "停止",
             "settings": "設定",
@@ -414,7 +410,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "theme": "テーマ",
         },
         "en": {
-            "title": "PDN Impedance Optimization Tool",
+            "title": "Deca Auto【PDN Impedance Optimization Tool】",
             "start_search": "Start Search",
             "stop_search": "Stop",
             "settings": "Settings",

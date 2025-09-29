@@ -228,7 +228,7 @@ def create_sidebar():
             )
         
         # 評価重み
-        with st.expander(get_localized_text('weights', config) if config.language == 'jp' else 'Evaluation Weights'):
+        with st.expander(get_localized_text('weights', config) if config.language == 'jp' else 'Evaluation Weights', expanded=True):
             col1, col2 = st.columns(2)
             with col1:
                 config.weight_max = st.slider("Max weight", 0.0, 1.0, config.weight_max, 0.05)
@@ -518,7 +518,7 @@ def create_results_tab():
             
             # グラフ2: Top-kのZ_pdn特性
             with graph2_placeholder.container():
-                st.subheader("📊 PDNインピーダンス特性 |Z_pdn| (Top-k)")
+                st.subheader("📊 PDNインピーダンス特性 |Z_pdn|")
                 if st.session_state.top_k_results and st.session_state.frequency_grid is not None:
                     try:
                         zpdn_chart = create_zpdn_chart()
