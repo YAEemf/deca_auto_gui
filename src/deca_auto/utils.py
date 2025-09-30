@@ -36,26 +36,43 @@ def setup_logger(name: str = "deca_auto", level: int = logging.INFO) -> logging.
     """
     logger = logging.getLogger(name)
     logger.setLevel(level)
-    
-    # ハンドラがない場合のみ追加
-    if not logger.handlers:
-        # コンソールハンドラ（stdout）
-        ch = logging.StreamHandler(stream=sys.stdout)
-        ch.setLevel(level)
+    logger.disabled = False
 
-        # フォーマッタ
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        ch.setFormatter(formatter)
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
 
-        logger.addHandler(ch)
+    stream_handler = None
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler):
+            stream_handler = handler
+            break
+
+    if stream_handler is None:
+        stream_handler = logging.StreamHandler(stream=sys.stdout)
+        logger.addHandler(stream_handler)
     else:
-        for handler in logger.handlers:
-            handler.setLevel(level)
+        try:
+            stream_handler.setStream(sys.stdout)
+        except AttributeError:
+            stream_handler.stream = sys.stdout
+
+    stream_handler.setLevel(level)
+    stream_handler.setFormatter(formatter)
+
+    # 既存ハンドラがある場合もレベルとフォーマットを揃える
+    for handler in logger.handlers:
+        handler.setLevel(level)
+        if isinstance(handler, logging.StreamHandler) and handler is not stream_handler:
+            handler.setFormatter(formatter)
 
     logger.propagate = False
+
+    # ルートロガーがWARNING以上の場合、情報出力が抑制されるため揃えておく
+    root_logger = logging.getLogger()
+    if root_logger.level > level:
+        root_logger.setLevel(level)
 
     return logger
 
@@ -69,6 +86,10 @@ def set_log_level(level: int):
     logger.setLevel(level)
     for handler in logger.handlers:
         handler.setLevel(level)
+    logger.disabled = False
+    root_logger = logging.getLogger()
+    if root_logger.level > level:
+        root_logger.setLevel(level)
 
 
 # バックエンド決定
@@ -162,26 +183,37 @@ def get_vram_budget(max_vram_ratio: float = 0.5, cuda_device: int = 0) -> Tuple[
         try:
             import psutil
             available_memory = psutil.virtual_memory().available
-            budget = int(available_memory * max_vram_ratio)
-            chunk_size = min(budget // 10, 100 * 1024 * 1024)  # 最大100MB
+            reserved = int(available_memory * 0.1)
+            budget = max(int(available_memory * max_vram_ratio) - reserved, int(available_memory * 0.1))
+            chunk_size = min(max(budget // 12, 8 * 1024 * 1024), 100 * 1024 * 1024)
         except ImportError:
             # psutilが無い場合はデフォルト値
             budget = 1024 * 1024 * 1024  # 1GB
-            chunk_size = 100 * 1024 * 1024  # 100MB
-        return budget, chunk_size
-    
+            chunk_size = 64 * 1024 * 1024  # 64MB
+        return max(budget, 32 * 1024 * 1024), max(chunk_size, 4 * 1024 * 1024)
+
     try:
         device = cp.cuda.Device(cuda_device)
-        free_memory = device.mem_info[0]
-        
-        # 利用可能メモリ
-        available_bytes = int(free_memory * max_vram_ratio)
-        
-        # チャンクサイズ（利用可能メモリの1/10、最大1GB）
-        chunk_size_limit = min(available_bytes // 10, 1024 * 1024 * 1024)
-        
+        free_memory, total_memory = device.mem_info
+        used_memory = total_memory - free_memory
+
+        ratio = min(max_vram_ratio, 0.98)
+        safety_reserve = max(int(total_memory * 0.02), 256 * 1024 * 1024)
+        permitted = int(total_memory * ratio) - used_memory - safety_reserve
+        permitted = max(permitted, 0)
+
+        free_cap = int(free_memory * 0.9)
+        available_bytes = max(min(permitted, free_cap), 64 * 1024 * 1024)
+
+        # チャンクサイズは保守的に設定し、余裕を確保
+        chunk_size_limit = max(min(available_bytes // 12, 512 * 1024 * 1024), 8 * 1024 * 1024)
+
+        # 万一available_bytesがfreeを上回りそうなときの保険
+        available_bytes = min(available_bytes, free_cap)
+        chunk_size_limit = min(chunk_size_limit, available_bytes)
+
         return available_bytes, chunk_size_limit
-        
+
     except Exception as e:
         logger.error(f"VRAMバジェット計算エラー: {e}")
         traceback.print_exc()
