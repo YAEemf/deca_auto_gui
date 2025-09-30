@@ -29,7 +29,7 @@ class UserConfig:
     # 周波数グリッド設定
     f_start: float = 1e2  # 開始周波数 [Hz]
     f_stop: float = 5e8  # 終了周波数 [Hz]
-    num_points_per_decade: int = 512  # DECADEごとの点数
+    num_points_per_decade: int = 256  # DECADEごとの点数
     
     # 評価帯域
     f_L: float = 1e3  # 下限周波数 [Hz]
@@ -42,23 +42,23 @@ class UserConfig:
             (1e3, 10e-3),
             (5e3, 10e-3),
             (2e4, 8e-3),
-            (1e6, 8e-3),
-            (1e8, 1e0),
+            (2e6, 8e-3),
+            (1e8, 0.45),
         ]
     )  # カスタムマスク [(freq, impedance), ...]
     
     # PDN寄生成分
-    R_vrm: float = 10e-3  # VRM抵抗 [Ω]
-    L_vrm: float = 10e-9  # VRMインダクタンス [H]
-    R_sN: float = 0.5e-3  # spreading抵抗（デカップリングコンデンサ用） [Ω]
-    L_sN: float = 0.5e-9  # spreadingインダクタンス（デカップリングコンデンサ用） [H]
-    L_mntN: float = 0.5e-9  # デフォルトマウントインダクタンス [H]
-    R_s: float = 0.5e-3  # spreading抵抗 [Ω]
-    L_s: float = 1e-9  # spreadingインダクタンス [H]
-    R_v: float = 0.5e-3  # via抵抗 [Ω]
-    L_v: float = 1e-9  # viaインダクタンス [H]
-    R_p: float = 10e-3  # プレーナ抵抗 [Ω]
-    C_p: float = 10e-12  # プレーナ容量 [F]
+    R_vrm: float = 15e-3    # VRM ESR [Ω]
+    L_vrm: float = 10e-9    # VRM ESL [H]
+    R_sN: float = 0.5e-3    # spreading抵抗（デカップリングコンデンサ用）[Ω]
+    L_sN: float = 0.5e-9    # spreadingインダクタンス（デカップリングコンデンサ用）[H]
+    L_mntN: float = 0.5e-9  # マウントインダクタンス [H]
+    R_s: float = 0.2e-3     # spreading抵抗（VCC直前）[Ω]
+    L_s: float = 0.25e-9    # spreadingインダクタンス（VCC直前）[H]
+    R_v: float = 0.2e-3     # via抵抗 [Ω]
+    L_v: float = 0.5e-9     # viaインダクタンス [H]
+    R_p: float = 10e-3      # プレーナ抵抗 [Ω]
+    C_p: float = 10e-12     # プレーナ容量 [F]
     tan_delta_p: float = 0.02  # 誘電正接
     
     # SPICEシミュレーション
@@ -92,10 +92,10 @@ class UserConfig:
     # スコア重み
     weight_max: float = 0.2
     weight_area: float = 1.0
-    weight_mean: float = 0.35
+    weight_mean: float = 0.3
     weight_anti: float = 0.2
     weight_flat: float = 0.1
-    weight_under: float = 0.0
+    weight_under: float = 0.1
     weight_parts: float = 0.1
     weight_mc_worst: float = 1.0
     
@@ -109,7 +109,7 @@ class UserConfig:
     
     # システム設定
     seed: int = 1234  # 乱数シード
-    max_vram_ratio_limit: float = 0.8  # VRAM使用率上限
+    max_vram_ratio_limit: float = 0.5  # VRAM使用率上限
     cuda: int = 0  # GPU番号
     dtype_c: str = "complex64"  # 複素数精度
     dtype_r: str = "float32"  # 実数精度
@@ -406,7 +406,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "monte_carlo": "Monte Carlo設定",
             "gpu_settings": "GPU設定",
             "weights": "評価重み",
-            "calculate_zc_only": "Z_cのみ計算",
+            "calculate_zc_only": "|Z_c|計算",
             "use_custom_mask": "カスタムマスクを使用",
             "load_file":"📁 ファイル",
             "save": "保存",
@@ -434,7 +434,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "monte_carlo": "Monte Carlo Settings",
             "gpu_settings": "GPU Settings",
             "weights": "Evaluation Weights",
-            "calculate_zc_only": "Calculate Z_c Only",
+            "calculate_zc_only": "Calculate |Z_c| Only",
             "use_custom_mask": "Use Custom Mask",
             "load_file":"📁 File Utility",
             "save": "Save",
