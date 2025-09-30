@@ -327,7 +327,23 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
         # 相対パスの場合はmodel_pathを基準にする
         if not spice_path.is_absolute():
             spice_path = model_path / spice_path
-        
+
+        if not spice_path.exists():
+            candidates = []
+            if spice_path.suffix == '':
+                candidates.extend([
+                    spice_path.with_suffix('.mod'),
+                    spice_path.with_suffix('.MOD')
+                ])
+            elif spice_path.suffix.lower() != '.mod':
+                candidates.append(spice_path.with_suffix('.mod'))
+
+            for candidate in candidates:
+                if candidate.exists():
+                    logger.info(f"{name}: 拡張子を補完してモデル {candidate.name} を使用します")
+                    spice_path = candidate
+                    break
+
         if spice_path.exists():
             # PySpiceでACサンプリング
             z_samples = simulate_ac_impedance(spice_path, f_grid, dc_bias)
