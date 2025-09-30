@@ -29,7 +29,7 @@ class UserConfig:
     # 周波数グリッド設定
     f_start: float = 1e2  # 開始周波数 [Hz]
     f_stop: float = 5e8  # 終了周波数 [Hz]
-    num_points_per_decade: int = 768  # 10倍周波数ごとの点数
+    num_points_per_decade: int = 512  # DECADEごとの点数
     
     # 評価帯域
     f_L: float = 1e3  # 下限周波数 [Hz]
@@ -42,8 +42,8 @@ class UserConfig:
             (1e3, 10e-3),
             (5e3, 10e-3),
             (2e4, 8e-3),
-            (6e5, 8e-3),
-            (1e8, 1.3e0),
+            (1e6, 8e-3),
+            (1e8, 1e0),
         ]
     )  # カスタムマスク [(freq, impedance), ...]
     
@@ -67,10 +67,6 @@ class UserConfig:
     
     # コンデンサリスト
     capacitors: List[Dict[str, Any]] = field(default_factory=lambda: [
-        {"name": "C_0603_0.01u", "C": 0.01e-6, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_0.022u", "C": 0.022e-6, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_0.033u", "C": 0.033e-6, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_0.047u", "C": 0.047e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_0.1u", "C": 0.1e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_0.22u", "C": 0.22e-6, "ESR": 15e-3, "ESL": 0.5e-9},
         {"name": "C_0603_0.33u", "C": 0.33e-6, "ESR": 15e-3, "ESL": 0.5e-9},
@@ -87,18 +83,18 @@ class UserConfig:
     ])
     
     # 探索設定
-    max_total_parts: int = 12  # コンデンサ総数上限
-    min_total_parts_ratio: float = 0.5  # 最小総数比率
-    top_k: int = 10  # 上位候補数
+    max_total_parts: int = 10  # コンデンサ総数上限
+    min_total_parts_ratio: float = 0.60  # 最小総数比率
+    top_k: int = 20  # 上位候補数
     shuffle_evaluation: bool = True  # 評価順のシャッフル
-    buffer_limit: float = 10e6  # バッファサイズ上限
+    buffer_limit: float = 80e6  # バッファサイズ上限
     
     # スコア重み
     weight_max: float = 0.2
     weight_area: float = 1.0
     weight_mean: float = 0.35
     weight_anti: float = 0.2
-    weight_flat: float = 0.2
+    weight_flat: float = 0.1
     weight_under: float = 0.0
     weight_parts: float = 0.1
     weight_mc_worst: float = 1.0
@@ -106,14 +102,14 @@ class UserConfig:
     # Monte Carlo設定
     mc_enable: bool = True
     mc_samples: int = 64
-    tol_C: float = 0.2  # 容量公差
-    tol_ESR: float = 0.2  # ESR公差
-    tol_ESL: float = 0.2  # ESL公差
+    tol_C: float = 0.15  # 容量公差
+    tol_ESR: float = 0.15  # ESR公差
+    tol_ESL: float = 0.15  # ESL公差
     mlcc_derating: float = 0.15  # MLCCディレーティング
     
     # システム設定
     seed: int = 1234  # 乱数シード
-    max_vram_ratio_limit: float = 0.75  # VRAM使用率上限
+    max_vram_ratio_limit: float = 0.8  # VRAM使用率上限
     cuda: int = 0  # GPU番号
     dtype_c: str = "complex64"  # 複素数精度
     dtype_r: str = "float32"  # 実数精度
@@ -363,8 +359,8 @@ def validate_config(config: UserConfig) -> bool:
         # システム設定の検証
         assert 0 < config.max_vram_ratio_limit <= 1, "VRAM使用率上限は0-1の範囲である必要があります"
         assert config.cuda >= 0, "GPU番号は非負の整数である必要があります"
-        assert config.dtype_c in ["complex64", "complex128"], "複素数精度が無効です"
-        assert config.dtype_r in ["float32", "float64"], "実数精度が無効です"
+        assert config.dtype_c in ["complex64", "complex128", "complex256"], "複素数精度が無効です"
+        assert config.dtype_r in ["float16", "float32", "float64", "float128"], "実数精度が無効です"
         
         # GUI設定の検証
         assert config.server_port > 0, "ポート番号は正の値である必要があります"

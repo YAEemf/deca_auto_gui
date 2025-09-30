@@ -455,11 +455,10 @@ def create_settings_tab():
             # デフォルトのカスタムマスクを作成
             default_mask = [
                 (1e3, 10e-3),
-                (1e4, 10e-3),
-                (1e5, 10e-3),
-                (1e6, 20e-3),
-                (1e7, 50e-3),
-                (1e8, 100e-3)
+                (5e3, 10e-3),
+                (2e4, 8e-3),
+                (1e6, 8e-3),
+                (1e8, 1e0),
             ]
             mask_data = pd.DataFrame(default_mask, columns=['Frequency [Hz]', 'Impedance [Ω]'])
             mask_data['Frequency [Hz]'] = mask_data['Frequency [Hz]'].apply(format_value)
