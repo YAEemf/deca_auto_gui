@@ -237,6 +237,19 @@ def apply_vector_fitting(z_samples: np.ndarray, f_grid: np.ndarray,
         return None
 
 
+def _get_cap_scalar(cap_config: Dict, key: str, default: float) -> float:
+    value = cap_config.get(key)
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        try:
+            return float(str(value))
+        except (TypeError, ValueError):
+            return float(default)
+
+
 def calculate_rlc_impedance(cap_config: Dict, f_grid: np.ndarray,
                            xp: Any = np, L_mntN: float = 0.5e-9) -> np.ndarray:
     """
@@ -252,21 +265,33 @@ def calculate_rlc_impedance(cap_config: Dict, f_grid: np.ndarray,
         複素インピーダンス
     """
     # パラメータ取得（デフォルト値使用）
-    C = cap_config.get('C', 1e-6) if cap_config.get('C') is not None else 1e-6
-    ESR = cap_config.get('ESR', 15e-3) if cap_config.get('ESR') is not None else 15e-3
-    ESL = cap_config.get('ESL', 0.5e-9) if cap_config.get('ESL') is not None else 0.5e-9
+    C = _get_cap_scalar(cap_config, 'C', 1e-6)
+    ESR = _get_cap_scalar(cap_config, 'ESR', 15e-3)
+    ESL = _get_cap_scalar(cap_config, 'ESL', 0.5e-9)
     
     # L_mntの処理：Noneの場合はデフォルト値を使用
     L_mnt = cap_config.get('L_mnt')
     if L_mnt is None:
-        L_mnt = L_mntN
+        L_mnt = float(L_mntN)
+    else:
+        try:
+            L_mnt = float(L_mnt)
+        except (TypeError, ValueError):
+            L_mnt = float(L_mntN)
     
     # 角周波数
-    omega = 2 * xp.pi * f_grid
-    
+    f_backend = xp.asarray(f_grid)
+    omega = 2 * xp.pi * f_backend
+    omega_safe = xp.where(omega == 0, xp.finfo(f_backend.dtype).tiny, omega)
+
     # 直列RLC+L_mnt: Z = ESR + j*ω*ESL - j/(ω*C) + j*ω*L_mnt
-    z_c = ESR + 1j * omega * ESL - 1j / (omega * C) + 1j * omega * L_mnt
-    
+    z_c = (
+        ESR
+        + 1j * omega * ESL
+        - 1j / (omega_safe * max(C, 1e-24))
+        + 1j * omega * L_mnt
+    )
+
     return z_c
 
 
@@ -318,7 +343,8 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
     logger.info(f"コンデンサ {name} のインピーダンス計算中...")
     
     z_c = None
-    capacitance = cap_config.get('C', None)
+    capacitance_raw = cap_config.get('C', None)
+    capacitance = float(capacitance_raw) if capacitance_raw is not None else None
     
     # SPICEモデルが指定されている場合
     if 'path' in cap_config and cap_config['path']:
@@ -373,12 +399,12 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
     
     # RLCフォールバック
     if z_c is None:
-        z_c = calculate_rlc_impedance(cap_config, f_grid, np, L_mntN)
+        z_c = calculate_rlc_impedance(cap_config, f_grid, xp, L_mntN)
         logger.info(f"{name}: RLCモデル使用")
         
         # 容量値確認
         if capacitance is None:
-            capacitance = cap_config.get('C', 1e-6)
+            capacitance = _get_cap_scalar(cap_config, 'C', 1e-6)
     
     # GPU転送（必要な場合）
     z_c = transfer_to_device(z_c, xp)

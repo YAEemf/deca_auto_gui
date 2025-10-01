@@ -21,6 +21,11 @@ except ImportError:
     CUPY_AVAILABLE = False
     print("CuPyが利用できません。NumPyモードで動作します。")
 
+try:
+    from tomlkit.items import Item as _TomlItem
+except ImportError:
+    _TomlItem = None
+
 
 # ロガー設定
 def setup_logger(name: str = "deca_auto", level: int = logging.INFO) -> logging.Logger:
@@ -92,6 +97,45 @@ def set_log_level(level: int):
         root_logger.setLevel(level)
 
 
+def unwrap_toml_value(value: Any) -> Any:
+    """tomlkitのItemをPythonプリミティブへ展開"""
+    if _TomlItem is not None and isinstance(value, _TomlItem):
+        return unwrap_toml_value(value.unwrap())
+    if isinstance(value, dict):
+        return {k: unwrap_toml_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(unwrap_toml_value(v) for v in value)
+    return value
+
+
+def to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    """値をfloatに正規化"""
+    v = unwrap_toml_value(value)
+    if v is None:
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        try:
+            return float(str(v))
+        except (TypeError, ValueError):
+            return default
+
+
+def to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    """値をintに正規化"""
+    v = unwrap_toml_value(value)
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        try:
+            return int(float(str(v)))
+        except (TypeError, ValueError):
+            return default
+
+
 # バックエンド決定
 def get_backend(force_numpy: bool = False, cuda_device: int = 0) -> Tuple[Any, str, bool]:
     """
@@ -134,6 +178,38 @@ def get_backend(force_numpy: bool = False, cuda_device: int = 0) -> Tuple[Any, s
 
 
 # GPU情報取得
+def _resolve_device_name(device: "cp.cuda.Device", index: int) -> str:  # type: ignore[name-defined]
+    """GPU名を取得（バージョン差異を吸収）"""
+    name_candidates: list[Any] = []
+
+    try:
+        attrs = device.attributes
+        name_candidates.extend([
+            attrs.get("Name"),
+            attrs.get("DeviceName"),
+        ])
+    except Exception:
+        pass
+
+    try:
+        props = cp.cuda.runtime.getDeviceProperties(index)
+        name_candidates.append(props.get("name"))
+    except Exception:
+        pass
+
+    for candidate in name_candidates:
+        if candidate is None:
+            continue
+        if isinstance(candidate, bytes):
+            try:
+                return candidate.decode("utf-8")
+            except Exception:
+                continue
+        return str(candidate)
+
+    return f"CUDA Device {index}"
+
+
 def get_gpu_info(cuda_device: int = 0) -> Optional[dict]:
     """
     GPU情報を取得
@@ -150,12 +226,19 @@ def get_gpu_info(cuda_device: int = 0) -> Optional[dict]:
     try:
         device = cp.cuda.Device(cuda_device)
         mem_info = device.mem_info
-        props = device.attributes
-        
+        name = _resolve_device_name(device, cuda_device)
+        try:
+            attrs = device.attributes
+        except Exception:
+            attrs = {}
+
         return {
             "device_id": cuda_device,
-            "name": props.get("DeviceName", "Unknown"),
-            "compute_capability": f"{props.get('ComputeCapabilityMajor', 0)}.{props.get('ComputeCapabilityMinor', 0)}",
+            "name": name,
+            "compute_capability": (
+                f"{attrs.get('ComputeCapabilityMajor', 0)}."
+                f"{attrs.get('ComputeCapabilityMinor', 0)}"
+            ),
             "total_memory_gb": mem_info[1] / 1024**3,
             "free_memory_gb": mem_info[0] / 1024**3,
             "used_memory_gb": (mem_info[1] - mem_info[0]) / 1024**3,
@@ -164,6 +247,30 @@ def get_gpu_info(cuda_device: int = 0) -> Optional[dict]:
         logger.error(f"GPU情報取得エラー: {e}")
         traceback.print_exc()
         return None
+
+
+def list_cuda_devices() -> list:
+    """利用可能なCUDAデバイス一覧を取得"""
+    if not CUPY_AVAILABLE:
+        return []
+
+    devices = []
+    try:
+        count = cp.cuda.runtime.getDeviceCount()
+    except Exception as exc:
+        logger.warning(f"CUDAデバイス数の取得に失敗しました: {exc}")
+        return []
+
+    for idx in range(count):
+        try:
+            device = cp.cuda.Device(idx)
+            name = _resolve_device_name(device, idx)
+            devices.append({'id': idx, 'name': name})
+        except Exception as exc:
+            logger.warning(f"CUDAデバイス情報の取得に失敗しました (index={idx}): {exc}")
+            continue
+
+    return devices
 
 
 # VRAM管理

@@ -10,6 +10,8 @@ import traceback
 from dataclasses import dataclass, field, asdict
 import numpy as np
 
+from deca_auto.utils import unwrap_toml_value, to_float, to_int
+
 
 @dataclass
 class CapacitorConfig:
@@ -192,47 +194,43 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> UserConfig:
             toml_data = tomlkit.load(f)
         
         # TOMLデータで設定を上書き
-        for key, value in toml_data.items():
+        for key, raw_value in toml_data.items():
+            value = unwrap_toml_value(raw_value)
             if hasattr(config, key):
                 # 特殊処理が必要なフィールド
-                if key == "capacitors":
-                    # コンデンサリストの処理
+                if key == "capacitors" and value is not None:
                     cap_list = []
                     for cap_data in value:
                         cap_dict = {}
                         for k, v in cap_data.items():
-                            if k in ["C", "ESR", "ESL", "L_mnt"] and isinstance(v, str):
-                                cap_dict[k] = parse_scientific_notation(v)
+                            v_unwrapped = unwrap_toml_value(v)
+                            if k in ["C", "ESR", "ESL", "L_mnt"]:
+                                if isinstance(v_unwrapped, str):
+                                    cap_dict[k] = parse_scientific_notation(v_unwrapped)
+                                elif v_unwrapped is not None:
+                                    cap_dict[k] = to_float(v_unwrapped, None)
                             elif k in ["MIN", "MAX"]:
-                                if v is None or v == "":
-                                    cap_dict[k] = None
-                                else:
-                                    try:
-                                        cap_dict[k] = int(float(v))
-                                    except Exception:
-                                        cap_dict[k] = None
+                                cap_dict[k] = to_int(v_unwrapped, None)
                             else:
-                                cap_dict[k] = v
+                                cap_dict[k] = v_unwrapped
                         cap_list.append(cap_dict)
                     setattr(config, key, cap_list)
                 elif key == "z_custom_mask" and value is not None:
-                    # カスタムマスクの処理
                     mask_list = []
                     for point in value:
                         if len(point) == 2:
-                            f_val = parse_scientific_notation(str(point[0])) if isinstance(point[0], str) else float(point[0])
-                            z_val = parse_scientific_notation(str(point[1])) if isinstance(point[1], str) else float(point[1])
-                            mask_list.append((f_val, z_val))
+                            f_raw, z_raw = point
+                            f_val = parse_scientific_notation(f_raw) if isinstance(f_raw, str) else to_float(f_raw, None)
+                            z_val = parse_scientific_notation(z_raw) if isinstance(z_raw, str) else to_float(z_raw, None)
+                            if f_val is not None and z_val is not None:
+                                mask_list.append((f_val, z_val))
                     setattr(config, key, mask_list if mask_list else None)
                 elif isinstance(value, str) and key.startswith(("f_", "R_", "L_", "C_", "z_", "tol_", "tan_", "dc_", "mlcc_", "max_vram_", "min_total_", "weight_")):
-                    # 数値パラメータの処理
                     try:
                         parsed_value = parse_scientific_notation(value)
                         setattr(config, key, parsed_value)
-                    except:
-                        # 解析に失敗した場合は元の値を保持
+                    except Exception:
                         print(f"警告: パラメータ {key} の解析に失敗: {value}")
-                        # デフォルト値を保持（setattr しない）
                 else:
                     setattr(config, key, value)
         

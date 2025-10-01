@@ -70,11 +70,6 @@ def calculate_pdn_parasitic_elements(f_grid: np.ndarray, config: UserConfig,
     """
     omega = 2 * xp.pi * f_grid
     
-    # VRM (Voltage Regulator Module)
-    # Y_vrm = 1/(R_vrm + jωL_vrm)
-    z_vrm = config.R_vrm + 1j * omega * config.L_vrm
-    y_vrm = 1.0 / z_vrm
-    
     # Via (BGAビア)
     # Z_v = R_v + jωL_v
     z_v = config.R_v + 1j * omega * config.L_v
@@ -93,6 +88,12 @@ def calculate_pdn_parasitic_elements(f_grid: np.ndarray, config: UserConfig,
     planar_admittance = omega * config.C_p * (tan_delta + 1j)
     denominator = 1 + config.R_p * planar_admittance
     y_p = safe_divide(planar_admittance, denominator, fill_value=1e-12, xp=xp)
+
+    # VRM (Voltage Regulator Module)
+    # Y_vrm = 1/(R_vrm + jωL_vrm) + Y_p
+    z_vrm = config.R_vrm + 1j * omega * config.L_vrm
+    y_vrm_core = safe_divide(1.0, z_vrm, fill_value=0.0, xp=xp)
+    y_vrm = y_vrm_core + y_p
     
     # Mounting inductance (マウントインダクタンス)
     # デフォルト値

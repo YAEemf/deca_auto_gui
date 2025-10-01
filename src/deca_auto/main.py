@@ -19,7 +19,7 @@ from deca_auto.utils import (
     logger, get_backend, get_gpu_info, get_vram_budget,
     generate_frequency_grid, create_evaluation_mask, create_target_mask,
     Timer, memory_cleanup, get_progress_bar, transfer_to_device,
-    get_dtype, ensure_numpy
+    get_dtype, ensure_numpy, to_float
 )
 from deca_auto.capacitor import calculate_all_capacitor_impedances
 from deca_auto.pdn import calculate_pdn_impedance_batch
@@ -394,18 +394,19 @@ def run_optimization(config: UserConfig,
     capacitor_names = list(cap_impedances.keys())
     capacitances = []
     for name in capacitor_names:
-        # 容量値を取得（設定から or インピーダンスから推定）
         cap_config = next((c for c in config.capacitors if c['name'] == name), None)
-        if cap_config and 'C' in cap_config:
-            capacitances.append(cap_config['C'])
+        if cap_config and 'C' in cap_config and cap_config['C'] is not None:
+            capacitances.append(to_float(cap_config['C'], 1e-6))
         else:
             # インピーダンスから容量推定（NumPyで実行）
             z_c = cap_impedances[name]
             z_c_np = ensure_numpy(z_c) if xp is not np else z_c
             f_grid_np = ensure_numpy(f_grid) if xp is not np else f_grid
             omega = 2 * np.pi * f_grid_np
-            c_estimated = -1 / (omega * np.imag(z_c_np)).mean()
-            capacitances.append(float(c_estimated))
+            omega_imag = omega * np.imag(z_c_np)
+            omega_imag = np.where(np.abs(omega_imag) < 1e-30, 1e-30, omega_imag)
+            c_estimated = -1.0 / omega_imag
+            capacitances.append(float(np.mean(c_estimated)))
     
     # ソート
     sorted_indices = np.argsort(capacitances)
@@ -605,6 +606,11 @@ def run_optimization(config: UserConfig,
         logger.error(f"探索エラー: {e}")
         traceback.print_exc()
 
+    host_cap_impedances = {
+        name: transfer_to_device(z, np)
+        for name, z in sorted_cap_impedances.items()
+    }
+
     if ctx.is_gpu:
         sorted_cap_impedances.clear()
         ctx.capacitor_impedances = {}
@@ -624,6 +630,7 @@ def run_optimization(config: UserConfig,
         'config': config,
         'backend': backend_name,
         'gpu_info': get_gpu_info(config.cuda) if is_gpu else None,
+        'capacitor_impedances': host_cap_impedances,
         'stopped': bool(ctx.stop_flag)
     }
 
