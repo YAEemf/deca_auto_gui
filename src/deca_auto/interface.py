@@ -1092,7 +1092,7 @@ def save_current_config(filename: Optional[str] = None):
     if filename:
         filepath = Path(filename)
     else:
-        filepath = Path("user_config.toml")
+        filepath = Path("config.toml")
     
     try:
         if save_config(config, filepath):

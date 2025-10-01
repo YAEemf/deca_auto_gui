@@ -1,0 +1,109 @@
+[frequency]
+# 周波数グリッド設定
+f_start = 1e2   # 開始周波数 [Hz]
+f_stop = 5e8    # 終了周波数 [Hz]
+num_points_per_decade = 256 # Decade毎の計算ポイント数
+
+# 評価帯域
+f_L = 1e3   # 下限周波数 [Hz]
+f_H = 1e8   # 上限周波数 [Hz]
+
+[target]
+# 目標インピーダンス
+z_target = 10e-3    # フラット目標 [Ω]
+
+# カスタムマスク（任意）[(freq, impedance), ...]
+# もしマスクの方が評価帯域より広ければマスクの帯域が優先される
+z_custom_mask = [
+    [1e3, 10e-3],
+    [5e3, 10e-3],
+    [2e4, 8e-3],
+    [2e6, 8e-3],
+    [1e8, 0.45],
+]
+
+[pdn_parasitic]
+# PDN寄生成分
+R_vrm = 0.015   # VRM ESR [Ω]
+L_vrm = 1e-08   # VRM ESL [H]
+R_sN = 0.0005   # spreading抵抗（デカップリングコンデンサ用）[Ω]
+L_sN = 5e-10    # spreadingインダクタンス（デカップリングコンデンサ用）[H]
+L_mntN = 5e-10  # マウントインダクタンス [H]
+R_s = 0.0002    # spreading抵抗（VCC直前）[Ω]
+L_s = 2.5e-10   # spreadingインダクタンス（VCC直前）[H]
+R_v = 0.0002    # via抵抗 [Ω]
+L_v = 5e-10     # viaインダクタンス [H]
+R_p = 0.015     # プレーナ抵抗 [Ω]
+C_p = 2.5e-11   # プレーナ容量 [F]
+tan_delta_p = 0.02  # 基板の誘電正接
+
+[spice]
+# SPICEシミュレーション
+dc_bias = 5.0       # DCバイアス電圧 [V]
+model_path = "model"    # SPICEモデルディレクトリ
+
+[search]
+# 探索設定
+max_total_parts = 10    # コンデンサ総数上限
+min_total_parts_ratio = 0.6     # 最小総数比率（これより少ない総数の組み合わせは探索から除外）
+top_k = 15  # 保持する上位候補数
+shuffle_evaluation = true   # 評価順のシャッフル（色々な組み合わせが現れるのでグラフを見てて楽しい。特に何かの役には立たない）
+buffer_limit = 80e6   # バッファサイズ上限
+
+[weights]
+# スコア重み（ある重みを大きくすると、その特性に優れた候補が現れやすくなる）
+weight_max = 0.2        # 最大値（評価帯域内での最大値）
+weight_area = 1.0       # 目標マスクに対する超過面積
+weight_under = 0.1      # 目標マスクに対する不足面積
+weight_mean = 0.3       # 平均値
+weight_anti = 0.2       # アンチレゾナンス（反共振によるピーク）
+weight_resonance = 0.1  # レゾナンス（共振による急峻な谷）
+weight_flat = 0.1       # 平滑さ
+weight_parts = 0.1      # 部品点数
+weight_num_types = 0.1  # 組み合わせにおける部品の種類数
+weight_mc_worst = 1.0   # Monte Carlo最悪値（部品特性のバラつきを考慮。常に1.0で良いかと）
+ignore_safe_anti_resonance = false  # 目標マスク以下におけるアンチレゾナンスを無視
+
+[monte_carlo]
+# Monte Carlo設定
+mc_enable = true
+mc_samples = 64
+tol_C = 0.15    # 容量公差
+tol_ESR = 0.15  # ESR公差
+tol_ESL = 0.15  # ESL公差
+mlcc_derating = 0.15    # MLCCディレーティング
+
+[system]
+# システム設定
+seed = 1234     # 乱数シード（シャッフルやMonte Carlo評価で使用）
+max_vram_ratio_limit = 0.5  # GPU VRAM使用率上限
+cuda = 0
+dtype_c = "complex64"   # 複素数精度
+dtype_r = "float32"     # 実数精度
+force_numpy = false     # NumPy強制使用（GPUが無い環境用）
+
+[gui]
+# GUI設定
+use_gui = true
+server_port = 8501
+dark_theme = true
+language = "jp"
+
+[output]
+excel_path = "out"
+excel_name = "dcap_result"
+
+# コンデンサリスト
+# SPICEモデルがある場合はpathを指定、ない場合はRLC値を直接指定
+[[capacitors]]
+name = "C_0603_0.1u"
+C = 0.1e-6
+ESR = 15e-3
+ESL = 0.5e-9
+L_mnt = 0.5e-9  # マウントインダクタンス
+
+# SPICEモデルを使用する場合の例
+# [[capacitors]]
+# name = "SPICE_DEMO104"
+# path = "MLCCSPICEDEMO.mod"  # model/MLCCSPICEDEMO.mod
+# L_mnt = 0.5e-9
