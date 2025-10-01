@@ -8,7 +8,6 @@ import os
 import sys
 import time
 import traceback
-import itertools
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any, Callable
 import numpy as np
@@ -56,39 +55,101 @@ class OptimizationContext:
     stop_flag: bool = False
     gui_callback: Optional[Callable] = None
     stop_event: Optional[Any] = None
+    z_without_decap: Optional[np.ndarray] = None
 
 
-def generate_count_vectors(num_capacitors: int, max_total: int, 
-                          min_total: int) -> np.ndarray:
+def generate_count_vectors(
+    num_capacitors: int,
+    max_total: int,
+    min_total: int,
+    min_counts: Optional[np.ndarray] = None,
+    max_counts: Optional[np.ndarray] = None,
+) -> np.ndarray:
     """
     コンデンサの組み合わせカウントベクトルを生成
-    
+
     Args:
         num_capacitors: コンデンサ種類数
         max_total: 最大総数
         min_total: 最小総数
-    
+        min_counts: 各コンデンサの最小使用数
+        max_counts: 各コンデンサの最大使用数
+
     Returns:
         カウントベクトルの配列 (N_combinations, num_capacitors)
     """
-    logger.info(f"組み合わせ生成: {num_capacitors}種類, 総数{min_total}～{max_total}個")
-    
-    out = []
+    if max_total < 0 or min_total < 0:
+        raise ValueError("max_totalおよびmin_totalは非負である必要があります")
 
-    for total in range(min_total, max_total + 1):
-        N = total + num_capacitors - 1
-        # バー位置の全組合せ
-        for bars in itertools.combinations(range(N), num_capacitors - 1):
-            prev = -1
-            counts = []
-            for b in (*bars, N):
-                counts.append(b - prev - 1)
-                prev = b
-            out.append(tuple(counts))
-    
-    count_vectors = np.asarray(out, dtype=np.int32)
+    if min_total > max_total:
+        logger.warning("最小総数が最大総数を上回っています。組み合わせは生成されません")
+        return np.zeros((0, num_capacitors), dtype=np.int32)
+
+    if min_counts is None:
+        min_counts = np.zeros(num_capacitors, dtype=np.int32)
+    else:
+        min_counts = np.asarray(min_counts, dtype=np.int32)
+
+    if max_counts is None:
+        max_counts = np.full(num_capacitors, max_total, dtype=np.int32)
+    else:
+        max_counts = np.asarray(max_counts, dtype=np.int32)
+
+    if min_counts.shape[0] != num_capacitors or max_counts.shape[0] != num_capacitors:
+        raise ValueError("min_counts と max_counts の長さは num_capacitors に一致する必要があります")
+
+    max_counts = np.minimum(max_counts, max_total)
+    min_counts = np.maximum(min_counts, 0)
+
+    total_min_possible = int(np.sum(min_counts))
+    total_max_possible = int(np.sum(max_counts))
+
+    if total_min_possible > max_total:
+        logger.error("各コンデンサの最小使用数の総和が最大総数を超えています。組み合わせが存在しません")
+        return np.zeros((0, num_capacitors), dtype=np.int32)
+
+    adjusted_min_total = max(min_total, total_min_possible)
+    adjusted_max_total = min(max_total, total_max_possible)
+
+    if adjusted_min_total > adjusted_max_total:
+        logger.warning("指定された範囲では有効な組み合わせが存在しません")
+        return np.zeros((0, num_capacitors), dtype=np.int32)
+
+    logger.info(
+        f"組み合わせ生成: {num_capacitors}種類, 総数{adjusted_min_total}～{adjusted_max_total}個, "
+        f"個別範囲min={min_counts.tolist()}, max={max_counts.tolist()}"
+    )
+
+    suffix_min = np.cumsum(min_counts[::-1])[::-1]
+    suffix_max = np.cumsum(max_counts[::-1])[::-1]
+
+    combinations: List[Tuple[int, ...]] = []
+
+    def backtrack(index: int, current: List[int], total: int) -> None:
+        if index == num_capacitors:
+            if adjusted_min_total <= total <= adjusted_max_total:
+                combinations.append(tuple(current))
+            return
+
+        remaining_min = suffix_min[index + 1] if index + 1 < num_capacitors else 0
+        remaining_max = suffix_max[index + 1] if index + 1 < num_capacitors else 0
+
+        lower_bound = max(min_counts[index], adjusted_min_total - total - remaining_max)
+        upper_bound = min(max_counts[index], adjusted_max_total - total - remaining_min)
+
+        if upper_bound < lower_bound:
+            return
+
+        for count in range(int(lower_bound), int(upper_bound) + 1):
+            current.append(count)
+            backtrack(index + 1, current, total + count)
+            current.pop()
+
+    backtrack(0, [], 0)
+
+    count_vectors = np.asarray(combinations, dtype=np.int32)
     logger.info(f"生成された組み合わせ数: {len(count_vectors)}")
-    
+
     return count_vectors
 
 
@@ -328,14 +389,6 @@ def run_optimization(config: UserConfig,
             gui_callback,
             dtype_c,
         )
-        
-        # GUIに周波数グリッドとターゲットマスクを送信
-        if gui_callback:
-            gui_callback({
-                'type': 'grid_update',
-                'frequency_grid': transfer_to_device(f_grid, np),
-                'target_mask': transfer_to_device(target_mask, np)
-            })
     
     # 容量でソート（小→大）
     capacitor_names = list(cap_impedances.keys())
@@ -383,13 +436,83 @@ def run_optimization(config: UserConfig,
     
     # カウントベクトル生成
     num_capacitors = len(sorted_cap_names)
+
+    # PDN特性（デカップリングなし）を計算
+    try:
+        zero_counts = np.zeros((1, num_capacitors), dtype=np.int32)
+        z_without_decap = calculate_pdn_impedance_batch(
+            zero_counts,
+            ctx.capacitor_impedances,
+            ctx.capacitor_indices,
+            ctx.f_grid,
+            ctx.config,
+            xp,
+        )[0]
+        z_without_decap_np = transfer_to_device(z_without_decap, np)
+        ctx.z_without_decap = z_without_decap_np
+    except Exception as exc:
+        logger.error(f"PDN特性（デカップリングなし）計算に失敗しました: {exc}")
+        z_without_decap_np = None
+
+    if gui_callback:
+        payload = {
+            'type': 'grid_update',
+            'frequency_grid': transfer_to_device(f_grid, np),
+            'target_mask': transfer_to_device(target_mask, np),
+        }
+        if z_without_decap_np is not None:
+            payload['z_without_decap'] = z_without_decap_np
+        gui_callback(payload)
+
+    min_counts_list: List[int] = []
+    max_counts_list: List[int] = []
+    max_total_parts = config.max_total_parts
+
+    for name in sorted_cap_names:
+        cap_cfg = next((c for c in config.capacitors if c['name'] == name), {})
+        min_val = cap_cfg.get('MIN') if cap_cfg else None
+        max_val = cap_cfg.get('MAX') if cap_cfg else None
+
+        try:
+            min_count = int(min_val) if min_val is not None else 0
+        except Exception:
+            logger.warning(f"コンデンサ {name} の最小使用数 {min_val} を整数化できませんでした。0 に設定します")
+            min_count = 0
+
+        try:
+            max_count = int(max_val) if max_val is not None else max_total_parts
+        except Exception:
+            logger.warning(f"コンデンサ {name} の最大使用数 {max_val} を整数化できませんでした。max_total_parts に合わせます")
+            max_count = max_total_parts
+
+        if max_count > max_total_parts:
+            logger.info(f"コンデンサ {name} の最大使用数 {max_count} を max_total_parts ({max_total_parts}) に合わせます")
+            max_count = max_total_parts
+
+        if min_count < 0:
+            logger.info(f"コンデンサ {name} の最小使用数 {min_count} を0に切り上げます")
+            min_count = 0
+
+        if max_count < min_count:
+            logger.info(f"コンデンサ {name} の最大使用数 {max_count} が最小使用数 {min_count} より小さいため調整します")
+            max_count = min_count
+
+        min_counts_list.append(min_count)
+        max_counts_list.append(max_count)
+
+    min_counts_arr = np.asarray(min_counts_list, dtype=np.int32)
+    max_counts_arr = np.asarray(max_counts_list, dtype=np.int32)
+
     min_total = max(1, int(config.max_total_parts * config.min_total_parts_ratio))
+    min_total = max(min_total, int(np.sum(min_counts_arr)))
     
     with Timer("組み合わせ生成"):
         count_vectors = generate_count_vectors(
             num_capacitors,
-            config.max_total_parts,
-            min_total
+            max_total_parts,
+            min_total,
+            min_counts_arr,
+            max_counts_arr,
         )
     
     # シャッフル（有効な場合）
@@ -497,6 +620,7 @@ def run_optimization(config: UserConfig,
         'capacitor_names': sorted_cap_names,
         'frequency_grid': transfer_to_device(f_grid, np),
         'target_mask': transfer_to_device(target_mask, np),
+        'z_pdn_without_decap': ctx.z_without_decap,
         'config': config,
         'backend': backend_name,
         'gpu_info': get_gpu_info(config.cuda) if is_gpu else None,

@@ -8,7 +8,7 @@ import sys
 import threading
 import queue
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -25,6 +25,87 @@ from deca_auto.capacitor import calculate_all_capacitor_impedances
 from deca_auto.evaluator import format_combination_name
 
 MAX_POINTS = 1024
+
+ZPDN_PALETTE = [
+    "#de425b",  # 薄い赤 — 最優先で目立たせたい
+    "#ef6b55",  # 明るいシアン（シアン系でアクセント）
+    "#fa9257",  # 黄色オレンジ系 — 高彩度・明るめ
+    "#ffb762",  # ミントグリーン／ライム調
+    "#ffdc7a",  # 紫（マゼンタ～バイオレット調）
+    "#ffff9d",  # 淡いブルー
+    "#cee88f",  # 淡めマゼンタ寄りピンク
+    "#9fd184",  # やや中間グレー系 — 抑えめ
+    "#72b97c",  # 温かめのオレンジ寄り（明るさを抑えた版）
+    "#45a074",  # 淡い水色
+]
+TARGET_MASK_COLOR = "#03DAC6"
+WITHOUT_DECAP_COLOR = "#018786"
+
+
+def format_usage_range(min_val: Optional[int], max_val: Optional[int]) -> str:
+    """MIN/MAX値を入力用文字列に整形"""
+    if min_val is None and max_val is None:
+        return ""
+    if min_val is not None and max_val is not None:
+        if int(min_val) == int(max_val):
+            return str(int(min_val))
+        return f"{int(min_val)}-{int(max_val)}"
+    if min_val is not None:
+        return f"{int(min_val)}-"
+    if max_val is not None:
+        return f"-{int(max_val)}"
+    return ""
+
+
+def parse_usage_range_input(text: str, max_total: int) -> Tuple[Optional[int], Optional[int]]:
+    """使用範囲文字列をMIN/MAXに変換"""
+    if text is None:
+        return None, None
+
+    raw = str(text).strip()
+    if raw == "":
+        return None, None
+
+    normalized = raw.replace(" ", "")
+
+    def _to_int(value: str) -> int:
+        return int(float(value))
+
+    min_val: Optional[int]
+    max_val: Optional[int]
+
+    if '-' not in normalized:
+        value = _to_int(normalized)
+        min_val = max_val = value
+    elif normalized.endswith('-') and normalized.count('-') == 1:
+        min_val = _to_int(normalized[:-1])
+        max_val = None
+    elif normalized.startswith('-') and normalized.count('-') == 1:
+        min_val = None
+        max_val = _to_int(normalized[1:])
+    else:
+        parts = normalized.split('-')
+        if len(parts) != 2 or parts[0] == '' or parts[1] == '':
+            raise ValueError(f"無効な範囲指定: {text}")
+        min_val = _to_int(parts[0])
+        max_val = _to_int(parts[1])
+        if max_val < min_val:
+            raise ValueError(f"最小値より小さい最大値が指定されました: {text}")
+
+    if min_val is not None:
+        min_val = max(min_val, 0)
+    if max_val is not None:
+        max_val = max(max_val, 0)
+
+    if max_total is not None and max_total >= 0:
+        if min_val is not None and min_val > max_total:
+            min_val = max_total
+        if max_val is not None and max_val > max_total:
+            max_val = max_total
+        if min_val is not None and max_val is not None and max_val < min_val:
+            max_val = min_val
+
+    return min_val, max_val
 
 # Streamlit設定
 st.set_page_config(
@@ -59,16 +140,19 @@ def initialize_session_state():
     
     if 'top_k_results' not in st.session_state:
         st.session_state.top_k_results = []
-    
+
     if 'frequency_grid' not in st.session_state:
         st.session_state.frequency_grid = None
-    
+
     if 'target_mask' not in st.session_state:
         st.session_state.target_mask = None
-    
+
+    if 'z_pdn_without_decap' not in st.session_state:
+        st.session_state.z_pdn_without_decap = None
+
     if 'capacitor_names' not in st.session_state:
         st.session_state.capacitor_names = []
-    
+
     if 'progress_value' not in st.session_state:
         st.session_state.progress_value = 0.0
 
@@ -89,6 +173,9 @@ def initialize_session_state():
 
     if 'stop_requested' not in st.session_state:
         st.session_state.stop_requested = False
+
+    if 'top_k_show_flags' not in st.session_state:
+        st.session_state.top_k_show_flags = []
 
 
 def create_sidebar():
@@ -235,20 +322,128 @@ def create_sidebar():
                 "Shuffle evaluation",
                 value=config.shuffle_evaluation
             )
-        
+
+        with st.expander(get_localized_text('stray_parameters', config)):
+            col1, col2 = st.columns(2)
+            with col1:
+                config.R_vrm = st.number_input(
+                    get_localized_text('label_R_vrm', config),
+                    value=float(config.R_vrm),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.L_vrm = st.number_input(
+                    get_localized_text('label_L_vrm', config),
+                    value=float(config.L_vrm),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.R_sN = st.number_input(
+                    get_localized_text('label_R_sN', config),
+                    value=float(config.R_sN),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.L_sN = st.number_input(
+                    get_localized_text('label_L_sN', config),
+                    value=float(config.L_sN),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.L_mntN = st.number_input(
+                    get_localized_text('label_L_mntN', config),
+                    value=float(config.L_mntN),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+            with col2:
+                config.R_s = st.number_input(
+                    get_localized_text('label_R_s', config),
+                    value=float(config.R_s),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.L_s = st.number_input(
+                    get_localized_text('label_L_s', config),
+                    value=float(config.L_s),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.R_v = st.number_input(
+                    get_localized_text('label_R_v', config),
+                    value=float(config.R_v),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.L_v = st.number_input(
+                    get_localized_text('label_L_v', config),
+                    value=float(config.L_v),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.R_p = st.number_input(
+                    get_localized_text('label_R_p', config),
+                    value=float(config.R_p),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.C_p = st.number_input(
+                    get_localized_text('label_C_p', config),
+                    value=float(config.C_p),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.tan_delta_p = st.number_input(
+                    get_localized_text('label_tan_delta_p', config),
+                    value=float(config.tan_delta_p),
+                    min_value=0.0,
+                    max_value=1.0,
+                    format="%.3f"
+                )
+
         # 評価重み
         with st.expander(get_localized_text('weights', config) if config.language == 'jp' else 'Evaluation Weights', expanded=True):
+            defaults = UserConfig()
+            weight_fields = [
+                'weight_max', 'weight_area', 'weight_mean', 'weight_anti',
+                'weight_flat', 'weight_under', 'weight_parts',
+                'weight_num_types', 'weight_resonance', 'weight_mc_worst'
+            ]
+
             col1, col2 = st.columns(2)
             with col1:
                 config.weight_max = st.slider("Max weight", 0.0, 1.0, config.weight_max, 0.05)
                 config.weight_area = st.slider("Area weight", 0.0, 1.0, config.weight_area, 0.05)
                 config.weight_mean = st.slider("Mean weight", 0.0, 1.0, config.weight_mean, 0.05)
                 config.weight_anti = st.slider("Anti-resonance weight", 0.0, 1.0, config.weight_anti, 0.05)
+                config.weight_num_types = st.slider(
+                    get_localized_text('weight_num_types', config),
+                    0.0,
+                    1.0,
+                    config.weight_num_types,
+                    0.05
+                )
             with col2:
                 config.weight_flat = st.slider("Flatness weight", 0.0, 1.0, config.weight_flat, 0.05)
                 config.weight_under = st.slider("Under weight", -1.0, 1.0, config.weight_under, 0.05)
                 config.weight_parts = st.slider("Parts penalty weight", 0.0, 1.0, config.weight_parts, 0.05)
+                config.weight_resonance = st.slider(
+                    get_localized_text('weight_resonance', config),
+                    0.0,
+                    1.0,
+                    config.weight_resonance,
+                    0.05
+                )
                 config.weight_mc_worst = st.slider("MC worst weight", 0.0, 1.0, config.weight_mc_worst, 0.05)
+                config.ignore_safe_anti_resonance = st.checkbox(
+                    get_localized_text('ignore_safe_anti', config),
+                    value=config.ignore_safe_anti_resonance
+                )
+
+            if st.button(get_localized_text('reset_weights', config), use_container_width=True):
+                for field in weight_fields:
+                    setattr(config, field, getattr(defaults, field))
+                config.ignore_safe_anti_resonance = defaults.ignore_safe_anti_resonance
         
         # Monte Carlo設定
         with st.expander(get_localized_text('monte_carlo', config)):
@@ -341,7 +536,7 @@ def create_main_content():
     
     # タブ作成
     tab1, tab2 = st.tabs([
-        f"📝 {get_localized_text('settings', config)}",
+        f"⚙️ {get_localized_text('settings', config)}",
         f"📊 {get_localized_text('results', config)}"
     ])
     
@@ -383,17 +578,21 @@ def create_settings_tab():
             'C [F]': format_value(c),
             'ESR [Ω]': format_value(esr),
             'ESL [H]': format_value(esl),
-            'L_mnt [H]': format_value(cap.get('L_mnt', config.L_mntN))
+            'L_mnt [H]': format_value(cap.get('L_mnt', config.L_mntN)),
+            'usage_range': format_usage_range(cap.get('MIN'), cap.get('MAX'))
         })
 
-    df = pd.DataFrame(cap_data)
+    df = pd.DataFrame(cap_data, columns=['Name', 'Path', 'C [F]', 'ESR [Ω]', 'ESL [H]', 'L_mnt [H]', 'usage_range'])
 
     # 編集可能なデータエディタ
     edited_df = st.data_editor(
         df,
         num_rows="dynamic",
         use_container_width=True,
-        key="capacitor_editor"
+        key="capacitor_editor",
+        column_config={
+            'usage_range': st.column_config.TextColumn(get_localized_text('usage_range', config))
+        }
     )
 
     # 編集内容を反映
@@ -409,6 +608,11 @@ def create_settings_tab():
                 # path があれば、空入力なら None に、入力あればその値にする
                 esr_val = parse_value(row['ESR [Ω]'], 0)
                 esl_val = parse_value(row['ESL [H]'], 0)
+            try:
+                min_count, max_count = parse_usage_range_input(row.get('usage_range', ''), config.max_total_parts)
+            except ValueError as exc:
+                st.error(str(exc))
+                return
             cap = {
                 'name': row['Name'],
                 'path': path_val,
@@ -417,6 +621,10 @@ def create_settings_tab():
                 'ESL': esl_val,
                 'L_mnt': parse_value(row['L_mnt [H]'], config.L_mntN)
             }
+            if min_count is not None:
+                cap['MIN'] = int(min_count)
+            if max_count is not None:
+                cap['MAX'] = int(max_count)
             new_caps.append(cap)
         config.capacitors = new_caps
         st.success(get_localized_text("update_caplist", config))
@@ -457,8 +665,8 @@ def create_settings_tab():
                 (1e3, 10e-3),
                 (5e3, 10e-3),
                 (2e4, 8e-3),
-                (1e6, 8e-3),
-                (1e8, 1e0),
+                (2e6, 8e-3),
+                (1e8, 0.45),
             ]
             mask_data = pd.DataFrame(default_mask, columns=['Frequency [Hz]', 'Impedance [Ω]'])
             mask_data['Frequency [Hz]'] = mask_data['Frequency [Hz]'].apply(format_value)
@@ -534,7 +742,7 @@ def create_results_tab():
             
             # グラフ1: コンデンサのZ_c特性
             with graph1_placeholder.container():
-                st.subheader("📈 コンデンサインピーダンス特性 |Z_c|")
+                st.subheader("コンデンサインピーダンス特性 |Z_c|")
                 if st.session_state.capacitor_impedances and st.session_state.frequency_grid is not None:
                     try:
                         zc_chart = create_zc_chart()
@@ -546,7 +754,7 @@ def create_results_tab():
             
             # グラフ2: Top-kのZ_pdn特性
             with graph2_placeholder.container():
-                st.subheader("📊 PDNインピーダンス特性 |Z_pdn|")
+                st.subheader("PDNインピーダンス特性 |Z_pdn|")
                 if st.session_state.top_k_results and st.session_state.frequency_grid is not None:
                     try:
                         zpdn_chart = create_zpdn_chart()
@@ -559,7 +767,7 @@ def create_results_tab():
             # Top-k結果テーブル
             with table_placeholder.container():
                 if st.session_state.top_k_results:
-                    st.subheader("🏆 Top-k 結果")
+                    st.subheader("Top-k 結果")
                     try:
                         results_df = create_results_dataframe()
                         st.dataframe(results_df, use_container_width=True)
@@ -586,7 +794,7 @@ def create_results_tab():
     else:
         # 最適化実行中でない場合は通常の表示
         # グラフ1: コンデンサのZ_c特性
-        st.subheader("📈 コンデンサインピーダンス特性 |Z_c|")
+        st.subheader("コンデンサインピーダンス特性 |Z_c|")
         if st.session_state.capacitor_impedances and st.session_state.frequency_grid is not None:
             try:
                 zc_chart = create_zc_chart()
@@ -599,7 +807,7 @@ def create_results_tab():
         st.divider()
         
         # グラフ2: Top-kのZ_pdn特性
-        st.subheader("📊 PDNインピーダンス特性 |Z_pdn| (Top-k)")
+        st.subheader("PDNインピーダンス特性 |Z_pdn| (Top-k)")
         if st.session_state.top_k_results and st.session_state.frequency_grid is not None:
             try:
                 zpdn_chart = create_zpdn_chart()
@@ -611,10 +819,27 @@ def create_results_tab():
         
         # Top-k結果テーブル
         if st.session_state.top_k_results:
-            st.subheader("🏆 Top-k 結果")
+            st.subheader("Top-k 結果")
             try:
-                results_df = create_results_dataframe()
-                st.dataframe(results_df, use_container_width=True)
+                results_df = create_results_dataframe(include_show=True)
+                edited_df = st.data_editor(
+                    results_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="topk_selector",
+                    column_config={
+                        'show': st.column_config.CheckboxColumn(
+                            get_localized_text('show_column', config),
+                            help=get_localized_text('show_column_help', config)
+                        )
+                    },
+                    disabled=['Rank', 'Combination', 'Total Score', 'Num Types', 'Parts Count', 'MC Worst']
+                )
+                if len(edited_df) == len(st.session_state.top_k_results):
+                    st.session_state.top_k_show_flags = [
+                        False if pd.isna(val) else bool(val)
+                        for val in edited_df['show'].tolist()
+                    ]
             except Exception as e:
                 st.error(f"テーブル作成エラー: {e}")
 
@@ -655,7 +880,7 @@ def create_zc_chart() -> alt.Chart:
                 axis=alt.Axis(title='Frequency [Hz]', grid=True)),
         y=alt.Y('Impedance:Q',
                 scale=alt.Scale(type='log', base=10),
-                axis=alt.Axis(title='|Z| [Ω]', grid=True)),
+                axis=alt.Axis(title='|Z_c| [Ω]', grid=True)),
         color=alt.Color('Capacitor:N', legend=alt.Legend(title='Capacitor')),
         tooltip=['Capacitor:N', 
                 alt.Tooltip('Frequency:Q', format='.3e'),
@@ -665,7 +890,7 @@ def create_zc_chart() -> alt.Chart:
         height=400,
         title='Capacitor Impedance Characteristics'
     ).configure_axis(
-        gridOpacity=0.3
+        gridOpacity=0.5
     )
     
     return chart
@@ -674,104 +899,130 @@ def create_zc_chart() -> alt.Chart:
 def create_zpdn_chart() -> alt.Chart:
     """PDN Z_pdn特性のグラフ作成"""
     config = st.session_state.config
-    
-    # データ準備
-    data_list = []
+
     f_grid = st.session_state.frequency_grid
     target_mask = st.session_state.target_mask
-    
-    # データが不足している場合
-    if f_grid is None or len(st.session_state.top_k_results) == 0:
-        # 空のチャートを返す
+    z_without = st.session_state.z_pdn_without_decap
+    top_k_results = st.session_state.top_k_results
+
+    if f_grid is None or (not top_k_results and target_mask is None and z_without is None):
         return alt.Chart(pd.DataFrame()).mark_line()
-    
+
     f_grid_np = ensure_numpy(f_grid)
-    
-    # Top-k結果
-    for i, result in enumerate(st.session_state.top_k_results[:10]):
+    max_step = max(1, len(f_grid_np) // MAX_POINTS)
+
+    data_list = []
+    running = st.session_state.optimization_running
+    show_flags = st.session_state.get('top_k_show_flags', [])
+
+    for i, result in enumerate(top_k_results[:10]):
+        if not running:
+            if i >= len(show_flags) or not show_flags[i]:
+                continue
         z_pdn = result.get('z_pdn')
-        if z_pdn is not None:
-            z_pdn_np = ensure_numpy(z_pdn)
-            if len(z_pdn_np) > 0:
-                # データフレーム用にデータを整形（間引き）
-                step = max(1, len(f_grid_np)//MAX_POINTS)
-                for j in range(0, len(f_grid_np), step):
-                    if j < len(f_grid_np) and j < len(z_pdn_np):
-                        data_list.append({
-                            'Frequency': float(f_grid_np[j]),
-                            'Impedance': float(np.abs(z_pdn_np[j])),
-                            'Type': f"Top-{i+1}",
-                            'Order': i
-                        })
-    
-    # 目標マスク
+        if z_pdn is None:
+            continue
+        z_pdn_np = ensure_numpy(z_pdn)
+        if len(z_pdn_np) == 0:
+            continue
+        for j in range(0, len(f_grid_np), max_step):
+            if j < len(z_pdn_np):
+                data_list.append({
+                    'Frequency': float(f_grid_np[j]),
+                    'Impedance': float(np.abs(z_pdn_np[j])),
+                    'Type': f"Top-{i+1}",
+                    'Order': i,
+                    'StrokeDash': 'Solid'
+                })
+
     if target_mask is not None:
         target_np = ensure_numpy(target_mask)
-        step = max(1, len(f_grid_np) // 100)
-        # custom_mask の帯域を取得（なければ全帯域）
+        step_target = max(1, len(f_grid_np) // 100)
         f_lo, f_hi = None, None
-        if st.session_state.config.z_custom_mask:
-            freqs = [pt[0] for pt in st.session_state.config.z_custom_mask if pt and len(pt) >= 2]
+        if config.z_custom_mask:
+            freqs = [pt[0] for pt in config.z_custom_mask if pt and len(pt) >= 2]
             if freqs:
                 f_lo, f_hi = min(freqs), max(freqs)
 
-        for j in range(0, len(f_grid_np), step):
-            if j < len(f_grid_np) and j < len(target_np):
+        for j in range(0, len(f_grid_np), step_target):
+            if j < len(target_np):
                 fval = float(f_grid_np[j])
-                # ★ custom_mask の帯域外はスキップ
                 if (f_lo is not None and fval < f_lo) or (f_hi is not None and fval > f_hi):
                     continue
                 data_list.append({
                     'Frequency': fval,
                     'Impedance': float(target_np[j]),
                     'Type': 'Target Mask',
-                    'Order': 999  # 最後に表示
+                    'Order': 1000,
+                    'StrokeDash': 'Target Mask'
                 })
-    
-    # データが空の場合の処理
-    if len(data_list) == 0:
+
+    if z_without is not None:
+        z_base_np = ensure_numpy(z_without)
+        if len(z_base_np) == len(f_grid_np):
+            for j in range(0, len(f_grid_np), max_step):
+                data_list.append({
+                    'Frequency': float(f_grid_np[j]),
+                    'Impedance': float(np.abs(z_base_np[j])),
+                    'Type': 'Without Decap',
+                    'Order': 1001,
+                    'StrokeDash': 'Without Decap'
+                })
+
+    if not data_list:
         return alt.Chart(pd.DataFrame()).mark_line()
-    
+
     df = pd.DataFrame(data_list)
-    
-    # Altairチャート作成
+
+    color_domain = [f"Top-{i+1}" for i in range(10)] + ['Without Decap', 'Target Mask']
+    color_range = ZPDN_PALETTE + [WITHOUT_DECAP_COLOR, TARGET_MASK_COLOR]
+
     chart = alt.Chart(df).mark_line(clip=True).encode(
-        x=alt.X('Frequency:Q',
-                scale=alt.Scale(type='log', base=10),
-                axis=alt.Axis(title='Frequency [Hz]', grid=True)),
-        y=alt.Y('Impedance:Q',
-                scale=alt.Scale(type='log', base=10),
-                axis=alt.Axis(title='|Z| [Ω]', grid=True)),
+        x=alt.X(
+            'Frequency:Q',
+            scale=alt.Scale(type='log', base=10),
+            axis=alt.Axis(title='Frequency [Hz]', grid=True)
+        ),
+        y=alt.Y(
+            'Impedance:Q',
+            scale=alt.Scale(type='log', base=10),
+            axis=alt.Axis(title='|Z_pdn| [Ω]', grid=True)
+        ),
         color=alt.Color(
             'Type:N',
-            legend=alt.Legend(title='Configuration'),
-            sort=alt.SortField(field='Order', order='ascending')
+            scale=alt.Scale(domain=color_domain, range=color_range),
+            legend=alt.Legend(title='Configuration')
         ),
-        strokeDash=alt.condition(
-            alt.datum.Type == 'Target Mask',
-            alt.value([5, 5]),  # 破線
-            alt.value([0])  # 実線
+        strokeDash=alt.StrokeDash(
+            'StrokeDash:N',
+            scale=alt.Scale(
+                domain=['Target Mask', 'Without Decap', 'Solid'],
+                range=[[4, 4], [4, 4], [0]]
+            ),
+            legend=None
         ),
         order='Order:O',
-        tooltip=['Type:N',
-                alt.Tooltip('Frequency:Q', format='.3e'),
-                alt.Tooltip('Impedance:Q', format='.3e')]
+        tooltip=[
+            'Type:N',
+            alt.Tooltip('Frequency:Q', format='.3e'),
+            alt.Tooltip('Impedance:Q', format='.3e')
+        ]
     ).properties(
         width=800,
         height=400,
-        title='PDN Impedance Characteristics (Top-k)'
+        title='PDN Impedance Characteristics'
     ).configure_axis(
-        gridOpacity=0.3
-    )
-    
+        gridOpacity=0.5
+    ).interactive()
+
     return chart
 
 
-def create_results_dataframe() -> pd.DataFrame:
+def create_results_dataframe(include_show: bool = False) -> pd.DataFrame:
     """結果テーブルのDataFrame作成"""
     data = []
     cap_names = st.session_state.get('capacitor_names', [])
-    
+
     if not cap_names:
         # capacitor_namesが空の場合、デフォルト名を使用
         num_caps = 0
@@ -781,30 +1032,44 @@ def create_results_dataframe() -> pd.DataFrame:
                 num_caps = max(num_caps, len(count_vec))
         cap_names = [f"Cap_{i+1}" for i in range(num_caps)]
     
+    show_flags = st.session_state.get('top_k_show_flags', [])
+
     for i, result in enumerate(st.session_state.top_k_results):
         try:
             count_vec = result.get('count_vector', [])
             if count_vec is not None:
                 count_vec = ensure_numpy(count_vec)
                 combo_str = format_combination_name(count_vec, cap_names)
-                
+
+                num_types = int(np.count_nonzero(count_vec)) if len(count_vec) > 0 else 0
+                show_flag = bool(show_flags[i]) if include_show and i < len(show_flags) else True
+
                 data.append({
+                    'show': show_flag,
                     'Rank': result.get('rank', i+1),
                     'Combination': combo_str,
                     'Total Score': f"{result.get('total_score', 0):.6f}",
+                    'Num Types': num_types,
                     'Parts Count': int(np.sum(count_vec)) if len(count_vec) > 0 else 0,
                     'MC Worst': f"{result.get('mc_worst_score', 0):.6f}" if 'mc_worst_score' in result else 'N/A'
                 })
         except Exception as e:
             logger.error(f"結果行作成エラー: {e}")
             continue
-    
+
     if not data:
         # データが空の場合、空のDataFrameを返す
-        return pd.DataFrame(columns=['Rank', 'Combination', 'Total Score', 'Parts Count', 'MC Worst'])
-    
+        columns = ['Rank', 'Combination', 'Total Score', 'Num Types', 'Parts Count', 'MC Worst']
+        if include_show:
+            columns = ['show'] + columns
+        return pd.DataFrame(columns=columns)
+
     df = pd.DataFrame(data)
     df = df.sort_values('Rank', kind='stable').reset_index(drop=True)
+
+    if not include_show:
+        df = df.drop(columns=['show'])
+
     return df
 
 
@@ -889,7 +1154,9 @@ def start_optimization():
     # 実行状態を設定
     st.session_state.optimization_running = True
     st.session_state.progress_value = 0.0
-    
+    st.session_state.top_k_show_flags = []
+    st.session_state.z_pdn_without_decap = None
+
     # キューをクリア
     while not st.session_state.result_queue.empty():
         try:
@@ -1004,12 +1271,15 @@ def process_result_queue():
                     st.session_state.frequency_grid = data['frequency_grid']
                 if 'target_mask' in data:
                     st.session_state.target_mask = data['target_mask']
-                
+                if 'z_without_decap' in data:
+                    st.session_state.z_pdn_without_decap = data['z_without_decap']
+
             elif data['type'] == 'top_k_update':
                 # Top-k更新
                 st.session_state.top_k_results = data['top_k']
                 st.session_state.capacitor_names = data.get('capacitor_names', [])
-                
+                st.session_state.top_k_show_flags = [True] * len(st.session_state.top_k_results)
+
                 # 周波数グリッドと目標マスクの更新
                 if 'frequency_grid' in data:
                     st.session_state.frequency_grid = data['frequency_grid']
@@ -1037,6 +1307,11 @@ def process_result_queue():
                     st.session_state.capacitor_names = results.get('capacitor_names', [])
                     st.session_state.frequency_grid = results.get('frequency_grid')
                     st.session_state.target_mask = results.get('target_mask')
+                    st.session_state.z_pdn_without_decap = results.get('z_pdn_without_decap')
+
+                    total_results = len(st.session_state.top_k_results)
+                    default_selected = min(10, total_results)
+                    st.session_state.top_k_show_flags = [idx < default_selected for idx in range(total_results)]
 
                 if stopped:
                     logger.info("探索停止処理が完了しました")

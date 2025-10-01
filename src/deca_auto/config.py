@@ -20,6 +20,8 @@ class CapacitorConfig:
     ESR: float = 15e-3  # 等価直列抵抗 [Ω]
     ESL: float = 0.5e-9  # 等価直列インダクタンス [H]
     L_mnt: Optional[float] = 0.5e-9  # マウントインダクタンス [H]
+    MIN: Optional[int] = None  # 最小使用数
+    MAX: Optional[int] = None  # 最大使用数
 
 
 @dataclass
@@ -57,8 +59,8 @@ class UserConfig:
     L_s: float = 0.25e-9    # spreadingインダクタンス（VCC直前）[H]
     R_v: float = 0.2e-3     # via抵抗 [Ω]
     L_v: float = 0.5e-9     # viaインダクタンス [H]
-    R_p: float = 10e-3      # プレーナ抵抗 [Ω]
-    C_p: float = 10e-12     # プレーナ容量 [F]
+    R_p: float = 15e-3      # 4mm2プレーナ抵抗 [Ω]
+    C_p: float = 10e-12     # 4mm2プレーナ容量 [F]
     tan_delta_p: float = 0.02  # 誘電正接
     
     # SPICEシミュレーション
@@ -97,7 +99,10 @@ class UserConfig:
     weight_flat: float = 0.1
     weight_under: float = 0.1
     weight_parts: float = 0.1
+    weight_num_types: float = 0.1
+    weight_resonance: float = 0.1
     weight_mc_worst: float = 1.0
+    ignore_safe_anti_resonance: bool = False
     
     # Monte Carlo設定
     mc_enable: bool = True
@@ -198,6 +203,14 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> UserConfig:
                         for k, v in cap_data.items():
                             if k in ["C", "ESR", "ESL", "L_mnt"] and isinstance(v, str):
                                 cap_dict[k] = parse_scientific_notation(v)
+                            elif k in ["MIN", "MAX"]:
+                                if v is None or v == "":
+                                    cap_dict[k] = None
+                                else:
+                                    try:
+                                        cap_dict[k] = int(float(v))
+                                    except Exception:
+                                        cap_dict[k] = None
                             else:
                                 cap_dict[k] = v
                         cap_list.append(cap_dict)
@@ -267,7 +280,19 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
             "pdn_parasitic": ["R_vrm", "L_vrm", "R_sN", "L_sN", "L_mntN", "R_s", "L_s", "R_v", "L_v", "R_p", "C_p", "tan_delta_p"],
             "spice": ["dc_bias", "model_path"],
             "search": ["max_total_parts", "min_total_parts_ratio", "top_k", "shuffle_evaluation", "buffer_limit"],
-            "weights": ["weight_max", "weight_area", "weight_mean", "weight_anti", "weight_flat", "weight_under", "weight_parts", "weight_mc_worst"],
+            "weights": [
+                "weight_max",
+                "weight_area",
+                "weight_mean",
+                "weight_anti",
+                "weight_flat",
+                "weight_under",
+                "weight_parts",
+                "weight_num_types",
+                "weight_resonance",
+                "weight_mc_worst",
+                "ignore_safe_anti_resonance"
+            ],
             "monte_carlo": ["mc_enable", "mc_samples", "tol_C", "tol_ESR", "tol_ESL", "mlcc_derating"],
             "system": ["seed", "max_vram_ratio_limit", "cuda", "dtype_c", "dtype_r", "force_numpy"],
             "gui": ["use_gui", "server_port", "dark_theme", "language"],
@@ -341,7 +366,17 @@ def validate_config(config: UserConfig) -> bool:
             if "path" not in cap:
                 if "C" in cap:
                     assert cap["C"] > 0, f"コンデンサ[{i}]の容量は正の値である必要があります"
-        
+
+            min_val = cap.get("MIN") if isinstance(cap, dict) else None
+            max_val = cap.get("MAX") if isinstance(cap, dict) else None
+
+            if min_val is not None:
+                assert float(min_val) >= 0, f"コンデンサ[{i}]の最小使用数は0以上である必要があります"
+            if max_val is not None:
+                assert float(max_val) >= 0, f"コンデンサ[{i}]の最大使用数は0以上である必要があります"
+            if min_val is not None and max_val is not None:
+                assert float(max_val) >= float(min_val), f"コンデンサ[{i}]の最大使用数は最小使用数以上である必要があります"
+
         # 探索設定の検証
         assert config.max_total_parts > 0, "最大総数は正の値である必要があります"
         assert config.min_total_parts_ratio <= 1, "最小総数比率は0-1の範囲である必要があります"
@@ -406,6 +441,10 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "monte_carlo": "Monte Carlo設定",
             "gpu_settings": "GPU設定",
             "weights": "評価重み",
+            "weight_num_types": "種類数の重み",
+            "weight_resonance": "共振ペナルティの重み",
+            "ignore_safe_anti": "目標以下のアンチレゾナンスを無視",
+            "reset_weights": "重みをリセット",
             "calculate_zc_only": "|Z_c|計算",
             "use_custom_mask": "カスタムマスクを使用",
             "load_file":"📁 ファイル",
@@ -416,6 +455,22 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "system":"システム",
             "language": "言語",
             "theme": "テーマ",
+            "stray_parameters": "寄生成分",
+            "usage_range": "使用数範囲",
+            "show_column": "表示",
+            "show_column_help": "グラフの表示を切り替え",
+            "label_R_vrm": "R_vrm [Ω]",
+            "label_L_vrm": "L_vrm [H]",
+            "label_R_sN": "R_sN [Ω]",
+            "label_L_sN": "L_sN [H]",
+            "label_L_mntN": "L_mntN [H]",
+            "label_R_s": "R_s [Ω]",
+            "label_L_s": "L_s [H]",
+            "label_R_v": "R_v [Ω]",
+            "label_L_v": "L_v [H]",
+            "label_R_p": "R_p [Ω]",
+            "label_C_p": "C_p [F]",
+            "label_tan_delta_p": "tanδ"
         },
         "en": {
             "title": "Deca Auto【PDN Impedance Optimization Tool】",
@@ -434,6 +489,10 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "monte_carlo": "Monte Carlo Settings",
             "gpu_settings": "GPU Settings",
             "weights": "Evaluation Weights",
+            "weight_num_types": "Num types weight",
+            "weight_resonance": "Resonance penalty weight",
+            "ignore_safe_anti": "Ignore anti-resonances under target",
+            "reset_weights": "Reset Weights",
             "calculate_zc_only": "Calculate |Z_c| Only",
             "use_custom_mask": "Use Custom Mask",
             "load_file":"📁 File Utility",
@@ -444,6 +503,22 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "system":"system",
             "language": "Language",
             "theme": "theme",
+            "stray_parameters": "Stray Parameters",
+            "usage_range": "Usage Range",
+            "show_column": "Show",
+            "show_column_help": "Toggle visibility in the chart",
+            "label_R_vrm": "R_vrm [Ω]",
+            "label_L_vrm": "L_vrm [H]",
+            "label_R_sN": "R_sN [Ω]",
+            "label_L_sN": "L_sN [H]",
+            "label_L_mntN": "L_mntN [H]",
+            "label_R_s": "R_s [Ω]",
+            "label_L_s": "L_s [H]",
+            "label_R_v": "R_v [Ω]",
+            "label_L_v": "L_v [H]",
+            "label_R_p": "R_p [Ω]",
+            "label_C_p": "C_p [F]",
+            "label_tan_delta_p": "tanδ"
         }
     }
     

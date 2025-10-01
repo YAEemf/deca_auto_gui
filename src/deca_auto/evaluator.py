@@ -99,6 +99,9 @@ def calculate_score_components_batch(
         peak_mask = (center > ratio_clipped[:, :-2]) & (center > ratio_clipped[:, 2:])
         peak_vals = xp.where(peak_mask, center, 0.0)
         peak_excess = xp.maximum(peak_vals - 1.0, 0.0)
+
+        if getattr(config, 'ignore_safe_anti_resonance', False):
+            peak_excess = xp.where(peak_vals <= 1.0, 0.0, peak_excess)
         peaks_count = xp.count_nonzero(peak_excess > 0.0, axis=1)
         sum_peak = peak_excess.sum(axis=1)
         avg_peak = safe_divide(sum_peak, xp.maximum(peaks_count, 1), 0.0, xp)
@@ -116,6 +119,28 @@ def calculate_score_components_batch(
     )
     score_flat = xp.minimum(score_flat, 10.0)
 
+    # コンデンサ種類数（正規化）
+    num_types = xp.count_nonzero(count_vectors > 0, axis=1).astype(float_dtype, copy=False)
+    score_num_types = safe_divide(
+        num_types,
+        max(1, count_vectors.shape[1]),
+        0.0,
+        xp,
+    )
+
+    if n_eval > 2:
+        z_eval_local = xp.abs(z_pdn_batch)[:, freq_indices]
+        left = z_eval_local[:, :-2]
+        center_abs = z_eval_local[:, 1:-1]
+        right = z_eval_local[:, 2:]
+        neighbor_mean = 0.5 * (left + right)
+        local_min_mask = (center_abs < left) & (center_abs < right)
+        depth_ratio = safe_divide(neighbor_mean, xp.maximum(center_abs, 1e-18), 1.0, xp) - 1.0
+        depth_ratio = xp.where(local_min_mask, xp.maximum(depth_ratio, 0.0), 0.0)
+        score_resonance = xp.minimum(depth_ratio.sum(axis=1), 50.0)
+    else:
+        score_resonance = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
+
     return {
         'max': score_max.astype(float_dtype, copy=False),
         'area': score_area.astype(float_dtype, copy=False),
@@ -124,6 +149,8 @@ def calculate_score_components_batch(
         'flat': score_flat.astype(float_dtype, copy=False),
         'under': score_under.astype(float_dtype, copy=False),
         'parts': score_parts.astype(float_dtype, copy=False),
+        'num_types': score_num_types.astype(float_dtype, copy=False),
+        'resonance': score_resonance.astype(float_dtype, copy=False),
     }
 
 
@@ -183,7 +210,9 @@ def evaluate_combinations(
         config.weight_anti  * comps['anti'] +
         config.weight_flat  * comps['flat'] +
         config.weight_parts * comps['parts'] +
-        config.weight_under * comps['under']
+        config.weight_under * comps['under'] +
+        config.weight_num_types * comps['num_types'] +
+        config.weight_resonance * comps['resonance']
     )
 
     return total.astype(xp.float32, copy=False)
