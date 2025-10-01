@@ -15,13 +15,13 @@ import numpy as np
 class CapacitorConfig:
     """コンデンサ設定"""
     name: str
-    path: Optional[str] = ""  # SPICEモデルパス
-    C: Optional[float] = 0  # 容量値 [F]
-    ESR: float = 15e-3  # 等価直列抵抗 [Ω]
-    ESL: float = 0.5e-9  # 等価直列インダクタンス [H]
+    path: Optional[str] = ""    # SPICEモデルパス
+    C: Optional[float] = 0      # 容量値 [F]
+    ESR: float = 15e-3          # 等価直列抵抗 [Ω]
+    ESL: float = 0.5e-9         # 等価直列インダクタンス [H]
     L_mnt: Optional[float] = 0.5e-9  # マウントインダクタンス [H]
-    MIN: Optional[int] = None  # 最小使用数
-    MAX: Optional[int] = None  # 最大使用数
+    MIN: Optional[int] = None   # 最小使用数
+    MAX: Optional[int] = None   # 最大使用数
 
 
 @dataclass
@@ -59,8 +59,8 @@ class UserConfig:
     L_s: float = 0.25e-9    # spreadingインダクタンス（VCC直前）[H]
     R_v: float = 0.2e-3     # via抵抗 [Ω]
     L_v: float = 0.5e-9     # viaインダクタンス [H]
-    R_p: float = 15e-3      # 4mm2プレーナ抵抗 [Ω]
-    C_p: float = 10e-12     # 4mm2プレーナ容量 [F]
+    R_p: float = 15e-3      # プレーナ抵抗 [Ω]
+    C_p: float = 25e-12     # プレーナ容量 [F]
     tan_delta_p: float = 0.02  # 誘電正接
     
     # SPICEシミュレーション
@@ -87,7 +87,7 @@ class UserConfig:
     # 探索設定
     max_total_parts: int = 10  # コンデンサ総数上限
     min_total_parts_ratio: float = 0.60  # 最小総数比率
-    top_k: int = 20  # 上位候補数
+    top_k: int = 15  # 上位候補数
     shuffle_evaluation: bool = True  # 評価順のシャッフル
     buffer_limit: float = 80e6  # バッファサイズ上限
     

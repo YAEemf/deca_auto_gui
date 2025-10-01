@@ -27,16 +27,16 @@ from deca_auto.evaluator import format_combination_name
 MAX_POINTS = 1024
 
 ZPDN_PALETTE = [
-    "#de425b",  # 薄い赤 — 最優先で目立たせたい
-    "#ef6b55",  # 明るいシアン（シアン系でアクセント）
-    "#fa9257",  # 黄色オレンジ系 — 高彩度・明るめ
-    "#ffb762",  # ミントグリーン／ライム調
-    "#ffdc7a",  # 紫（マゼンタ～バイオレット調）
-    "#ffff9d",  # 淡いブルー
-    "#cee88f",  # 淡めマゼンタ寄りピンク
-    "#9fd184",  # やや中間グレー系 — 抑えめ
-    "#72b97c",  # 温かめのオレンジ寄り（明るさを抑えた版）
-    "#45a074",  # 淡い水色
+    "#de425b",
+    "#ef6b55",
+    "#fa9257",
+    "#ffb762",
+    "#ffdc7a",
+    "#ffff9d",
+    "#cee88f",
+    "#9fd184",
+    "#72b97c",
+    "#45a074",
 ]
 TARGET_MASK_COLOR = "#03DAC6"
 WITHOUT_DECAP_COLOR = "#018786"
