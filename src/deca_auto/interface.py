@@ -323,84 +323,6 @@ def create_sidebar():
                 value=config.shuffle_evaluation
             )
 
-        with st.expander(get_localized_text('stray_parameters', config)):
-            col1, col2 = st.columns(2)
-            with col1:
-                config.R_vrm = st.number_input(
-                    get_localized_text('label_R_vrm', config),
-                    value=float(config.R_vrm),
-                    min_value=0.0,
-                    format="%.3e"
-                )
-                config.L_vrm = st.number_input(
-                    get_localized_text('label_L_vrm', config),
-                    value=float(config.L_vrm),
-                    min_value=0.0,
-                    format="%.3e"
-                )
-                config.R_sN = st.number_input(
-                    get_localized_text('label_R_sN', config),
-                    value=float(config.R_sN),
-                    min_value=0.0,
-                    format="%.3e"
-                )
-                config.L_sN = st.number_input(
-                    get_localized_text('label_L_sN', config),
-                    value=float(config.L_sN),
-                    min_value=0.0,
-                    format="%.3e"
-                )
-                config.L_mntN = st.number_input(
-                    get_localized_text('label_L_mntN', config),
-                    value=float(config.L_mntN),
-                    min_value=0.0,
-                    format="%.3e"
-                )
-            with col2:
-                config.R_s = st.number_input(
-                    get_localized_text('label_R_s', config),
-                    value=float(config.R_s),
-                    min_value=0.0,
-                    format="%.3e"
-                )
-                config.L_s = st.number_input(
-                    get_localized_text('label_L_s', config),
-                    value=float(config.L_s),
-                    min_value=0.0,
-                    format="%.3e"
-                )
-                config.R_v = st.number_input(
-                    get_localized_text('label_R_v', config),
-                    value=float(config.R_v),
-                    min_value=0.0,
-                    format="%.3e"
-                )
-                config.L_v = st.number_input(
-                    get_localized_text('label_L_v', config),
-                    value=float(config.L_v),
-                    min_value=0.0,
-                    format="%.3e"
-                )
-                config.R_p = st.number_input(
-                    get_localized_text('label_R_p', config),
-                    value=float(config.R_p),
-                    min_value=0.0,
-                    format="%.3e"
-                )
-                config.C_p = st.number_input(
-                    get_localized_text('label_C_p', config),
-                    value=float(config.C_p),
-                    min_value=0.0,
-                    format="%.3e"
-                )
-                config.tan_delta_p = st.number_input(
-                    get_localized_text('label_tan_delta_p', config),
-                    value=float(config.tan_delta_p),
-                    min_value=0.0,
-                    max_value=1.0,
-                    format="%.3f"
-                )
-
         # 評価重み
         with st.expander(get_localized_text('weights', config) if config.language == 'jp' else 'Evaluation Weights', expanded=True):
             defaults = UserConfig()
@@ -412,30 +334,19 @@ def create_sidebar():
 
             col1, col2 = st.columns(2)
             with col1:
-                config.weight_max = st.slider("Max weight", 0.0, 1.0, config.weight_max, 0.05)
-                config.weight_area = st.slider("Area weight", 0.0, 1.0, config.weight_area, 0.05)
-                config.weight_mean = st.slider("Mean weight", 0.0, 1.0, config.weight_mean, 0.05)
-                config.weight_anti = st.slider("Anti-resonance weight", 0.0, 1.0, config.weight_anti, 0.05)
-                config.weight_num_types = st.slider(
-                    get_localized_text('weight_num_types', config),
-                    0.0,
-                    1.0,
-                    config.weight_num_types,
-                    0.05
-                )
+                config.weight_max = st.slider("Max", 0.0, 1.0, config.weight_max, 0.05)
+                config.weight_area = st.slider("Area", 0.0, 1.0, config.weight_area, 0.05)
+                config.weight_mean = st.slider("Mean", 0.0, 1.0, config.weight_mean, 0.05)
+                config.weight_anti = st.slider("Anti-resonance", 0.0, 1.0, config.weight_anti, 0.05)
+                config.weight_num_types = st.slider('Num types', 0.0, 1.0, config.weight_num_types, 0.05)    # get_localized_text('weight_num_types', config)
             with col2:
-                config.weight_flat = st.slider("Flatness weight", 0.0, 1.0, config.weight_flat, 0.05)
-                config.weight_under = st.slider("Under weight", -1.0, 1.0, config.weight_under, 0.05)
-                config.weight_parts = st.slider("Parts penalty weight", 0.0, 1.0, config.weight_parts, 0.05)
-                config.weight_resonance = st.slider(
-                    get_localized_text('weight_resonance', config),
-                    0.0,
-                    1.0,
-                    config.weight_resonance,
-                    0.05
-                )
-                config.weight_mc_worst = st.slider("MC worst weight", 0.0, 1.0, config.weight_mc_worst, 0.05)
-                config.ignore_safe_anti_resonance = st.checkbox(
+                config.weight_flat = st.slider("Flatness", 0.0, 1.0, config.weight_flat, 0.05)
+                config.weight_under = st.slider("Under", -1.0, 1.0, config.weight_under, 0.05)
+                config.weight_parts = st.slider("Parts penalty", 0.0, 1.0, config.weight_parts, 0.05)
+                config.weight_resonance = st.slider('Resonance', 0.0, 1.0, config.weight_resonance, 0.05)    # get_localized_text('weight_resonance', config)
+                config.weight_mc_worst = st.slider("MC worst", 0.0, 1.0, config.weight_mc_worst, 0.05)
+
+            config.ignore_safe_anti_resonance = st.checkbox(
                     get_localized_text('ignore_safe_anti', config),
                     value=config.ignore_safe_anti_resonance
                 )
@@ -478,6 +389,85 @@ def create_sidebar():
                     max_value=1.0,
                     value=config.tol_ESL,
                     step=0.01
+                )
+
+        # 寄生成分
+        with st.expander(get_localized_text('stray_parameters', config)):
+            col1, col2 = st.columns(2)
+            with col1:
+                config.R_vrm = st.number_input(
+                    get_localized_text('label_R_vrm', config),
+                    value=float(config.R_vrm),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.L_vrm = st.number_input(
+                    get_localized_text('label_L_vrm', config),
+                    value=float(config.L_vrm),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.R_sN = st.number_input(
+                    get_localized_text('label_R_sN', config),
+                    value=float(config.R_sN),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.L_sN = st.number_input(
+                    get_localized_text('label_L_sN', config),
+                    value=float(config.L_sN),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.L_mntN = st.number_input(
+                    get_localized_text('label_L_mntN', config),
+                    value=float(config.L_mntN),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.C_p = st.number_input(
+                    get_localized_text('label_C_p', config),
+                    value=float(config.C_p),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+            with col2:
+                config.R_s = st.number_input(
+                    get_localized_text('label_R_s', config),
+                    value=float(config.R_s),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.L_s = st.number_input(
+                    get_localized_text('label_L_s', config),
+                    value=float(config.L_s),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.R_v = st.number_input(
+                    get_localized_text('label_R_v', config),
+                    value=float(config.R_v),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.L_v = st.number_input(
+                    get_localized_text('label_L_v', config),
+                    value=float(config.L_v),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.R_p = st.number_input(
+                    get_localized_text('label_R_p', config),
+                    value=float(config.R_p),
+                    min_value=0.0,
+                    format="%.3e"
+                )
+                config.tan_delta_p = st.number_input(
+                    get_localized_text('label_tan_delta_p', config),
+                    value=float(config.tan_delta_p),
+                    min_value=0.0,
+                    max_value=1.0,
+                    format="%.3f"
                 )
         
         # GPU設定
@@ -833,7 +823,7 @@ def create_results_tab():
                             help=get_localized_text('show_column_help', config)
                         )
                     },
-                    disabled=['Rank', 'Combination', 'Total Score', 'Num Types', 'Parts Count', 'MC Worst']
+                    disabled=['Rank', 'Combination', 'Total Score', 'Types', 'Parts', 'MC Worst']
                 )
                 if len(edited_df) == len(st.session_state.top_k_results):
                     st.session_state.top_k_show_flags = [
@@ -886,7 +876,7 @@ def create_zc_chart() -> alt.Chart:
                 alt.Tooltip('Frequency:Q', format='.3e'),
                 alt.Tooltip('Impedance:Q', format='.3e')]
     ).properties(
-        width=800,
+        width=750,
         height=400,
         title='Capacitor Impedance Characteristics'
     ).configure_axis(
@@ -1009,7 +999,7 @@ def create_zpdn_chart() -> alt.Chart:
         ]
     ).properties(
         width=800,
-        height=400,
+        height=450,
         title='PDN Impedance Characteristics'
     ).configure_axis(
         gridOpacity=0.5
@@ -1049,8 +1039,8 @@ def create_results_dataframe(include_show: bool = False) -> pd.DataFrame:
                     'Rank': result.get('rank', i+1),
                     'Combination': combo_str,
                     'Total Score': f"{result.get('total_score', 0):.6f}",
-                    'Num Types': num_types,
-                    'Parts Count': int(np.sum(count_vec)) if len(count_vec) > 0 else 0,
+                    'Types': num_types,
+                    'Parts': int(np.sum(count_vec)) if len(count_vec) > 0 else 0,
                     'MC Worst': f"{result.get('mc_worst_score', 0):.6f}" if 'mc_worst_score' in result else 'N/A'
                 })
         except Exception as e:
@@ -1059,7 +1049,7 @@ def create_results_dataframe(include_show: bool = False) -> pd.DataFrame:
 
     if not data:
         # データが空の場合、空のDataFrameを返す
-        columns = ['Rank', 'Combination', 'Total Score', 'Num Types', 'Parts Count', 'MC Worst']
+        columns = ['Rank', 'Combination', 'Total Score', 'Types', 'Parts', 'MC Worst']
         if include_show:
             columns = ['show'] + columns
         return pd.DataFrame(columns=columns)
@@ -1079,7 +1069,7 @@ def format_value(value: Optional[float]) -> str:
         return ""
     if value == 0:
         return "0"
-    elif abs(value) < 1e-3 or abs(value) >= 1e6:
+    elif abs(value) < 1e-3 or abs(value) >= 1e3:
         return f"{value:.3e}"
     else:
         return f"{value:.6f}"
