@@ -84,18 +84,23 @@ def export_to_excel(results: Dict, config: UserConfig) -> bool:
         
         # 2. Top-k詳細シート
         detail_sheet = workbook.add_worksheet('Top-k Details')
-        write_detail_sheet(detail_sheet, results, config, header_format, 
+        write_detail_sheet(detail_sheet, results, config, header_format,
                           cell_format, number_format)
-        
-        # 3. インピーダンスデータシート
+
+        # 3. |Z_c|データシート
+        zc_data_sheet = workbook.add_worksheet('|Z_c| Data')
+        write_zc_impedance_data(zc_data_sheet, results, header_format, number_format)
+
+        # 4. PDNインピーダンスデータシート
         data_sheet = workbook.add_worksheet('Impedance Data')
-        write_impedance_data(data_sheet, results, header_format, number_format)
-        
-        # 4. グラフシート
+        write_impedance_data(data_sheet, results, config, header_format, number_format)
+
+        # 5. グラフシート
         chart_sheet = workbook.add_worksheet('Charts')
+        create_zc_chart(workbook, chart_sheet, zc_data_sheet, results, config)
         create_impedance_chart(workbook, chart_sheet, data_sheet, results, config)
-        
-        # 5. 設定シート
+
+        # 6. 設定シート
         config_sheet = workbook.add_worksheet('Configuration')
         write_config_sheet(config_sheet, config, header_format, cell_format)
         
@@ -255,14 +260,58 @@ def write_detail_sheet(worksheet, results: Dict, config: UserConfig,
     worksheet.set_column(2, 12, 12)
 
 
-def write_impedance_data(worksheet, results: Dict, header_format, number_format):
-    """インピーダンスデータを書き込む"""
-    
+def write_zc_impedance_data(worksheet, results: Dict, header_format, number_format):
+    """Z_cインピーダンスデータを書き込む"""
+
     # ヘッダー
     row = 0
     col = 0
     worksheet.write(row, col, "Frequency [Hz]", header_format)
-    
+
+    # コンデンサ名
+    cap_impedances = results.get('capacitor_impedances', {})
+    cap_names_list = list(cap_impedances.keys())
+
+    for cap_name in cap_names_list:
+        col += 1
+        worksheet.write(row, col, f"{cap_name} |Z| [Ω]", header_format)
+
+    # データ書き込み
+    f_grid = ensure_numpy(results.get('frequency_grid', []))
+
+    # データを間引く（最大1000点）
+    max_points = 1000
+    if len(f_grid) > max_points:
+        step = max(1, len(f_grid) // max_points)
+        indices = list(range(0, len(f_grid), step))
+    else:
+        indices = list(range(len(f_grid)))
+
+    # データ行
+    for i in indices:
+        row += 1
+        col = 0
+
+        # 周波数
+        worksheet.write(row, col, float(f_grid[i]), number_format)
+
+        # 各コンデンサのインピーダンス
+        for cap_name in cap_names_list:
+            col += 1
+            z_c = ensure_numpy(cap_impedances[cap_name])
+            if i < len(z_c):
+                z_abs = float(np.abs(z_c[i]))
+                worksheet.write(row, col, z_abs, number_format)
+
+
+def write_impedance_data(worksheet, results: Dict, config: UserConfig, header_format, number_format):
+    """PDNインピーダンスデータを書き込む"""
+
+    # ヘッダー
+    row = 0
+    col = 0
+    worksheet.write(row, col, "Frequency [Hz]", header_format)
+
     # Top-kのラベル
     top_k = results.get('top_k_results', [])
     cap_names = results.get('capacitor_names', [])
@@ -281,64 +330,134 @@ def write_impedance_data(worksheet, results: Dict, header_format, number_format)
     if has_without:
         col += 1
         worksheet.write(row, col, "Without Decap |Z| [Ω]", header_format)
-    
+
     # データ書き込み
     f_grid = ensure_numpy(results.get('frequency_grid', []))
     target_mask = ensure_numpy(results.get('target_mask', []))
-    
+
+    # 評価帯域の計算（Target Mask表示制御用）
+    if config.z_custom_mask:
+        freqs = [pt[0] for pt in config.z_custom_mask if pt and len(pt) >= 2]
+        eval_f_L = min(freqs) if freqs else config.f_L
+        eval_f_H = max(freqs) if freqs else config.f_H
+    else:
+        eval_f_L = config.f_L
+        eval_f_H = config.f_H
+
     # データを間引く（最大1000点）
     max_points = 1000
     if len(f_grid) > max_points:
-        step = len(f_grid) // max_points
-        f_grid_dec = f_grid[::step]
-        target_mask_dec = target_mask[::step]
-        indices = np.arange(0, len(f_grid), step)
+        step = max(1, len(f_grid) // max_points)
+        indices = list(range(0, len(f_grid), step))
     else:
-        f_grid_dec = f_grid
-        target_mask_dec = target_mask
-        indices = np.arange(len(f_grid))
+        indices = list(range(len(f_grid)))
     
     # データ行
     z_without_np = ensure_numpy(z_without) if has_without else None
 
-    for i, freq in enumerate(f_grid_dec):
+    for i in indices:
         row += 1
         col = 0
 
         # 周波数
+        freq = float(f_grid[i])
         worksheet.write(row, col, freq, number_format)
-        
+
         # Top-kインピーダンス
         for j, result in enumerate(top_k[:10]):
             col += 1
             z_pdn = ensure_numpy(result['z_pdn'])
-            z_abs = np.abs(z_pdn[indices[i]])
-            worksheet.write(row, col, z_abs, number_format)
-        
-        # 目標マスク
+            if i < len(z_pdn):
+                z_abs = float(np.abs(z_pdn[i]))
+                worksheet.write(row, col, z_abs, number_format)
+
+        # 目標マスク（評価帯域内のみ）
         col += 1
-        worksheet.write(row, col, target_mask_dec[i], number_format)
+        if eval_f_L <= freq <= eval_f_H and i < len(target_mask):
+            worksheet.write(row, col, float(target_mask[i]), number_format)
+        # 評価帯域外は空セル
 
-        if has_without and z_without_np is not None and len(z_without_np) > indices[i]:
+        if has_without and z_without_np is not None and i < len(z_without_np):
             col += 1
-            worksheet.write(row, col, float(np.abs(z_without_np[indices[i]])), number_format)
+            worksheet.write(row, col, float(np.abs(z_without_np[i])), number_format)
 
 
-def create_impedance_chart(workbook, chart_sheet, data_sheet, 
-                          results: Dict, config: UserConfig):
-    """インピーダンスグラフを作成"""
-    
+def create_zc_chart(workbook, chart_sheet, zc_data_sheet,
+                   results: Dict, config: UserConfig):
+    """Z_cインピーダンスグラフを作成"""
+
     # グラフ作成
     chart = workbook.add_chart({'type': 'scatter', 'subtype': 'straight'})
-    
+
+    # データ範囲
+    cap_impedances = results.get('capacitor_impedances', {})
+    cap_names_list = list(cap_impedances.keys())
+    f_grid = ensure_numpy(results.get('frequency_grid', []))
+
+    # データ点数（間引き後）
+    max_points = 1000
+    if len(f_grid) > max_points:
+        step = max(1, len(f_grid) // max_points)
+        n_points = len(list(range(0, len(f_grid), step)))
+    else:
+        n_points = len(f_grid)
+
+    # 各コンデンサの系列を追加
+    for i, cap_name in enumerate(cap_names_list):
+        chart.add_series({
+            'name': cap_name,
+            'categories': ['|Z_c| Data', 1, 0, n_points, 0],  # 周波数
+            'values': ['|Z_c| Data', 1, i+1, n_points, i+1],  # |Z_c|
+            'line': {'width': 1.5},
+            'marker': {'type': 'none'}
+        })
+
+    # グラフ設定
+    chart.set_title({'name': 'Capacitor Impedance |Z_c| vs Frequency'})
+    chart.set_x_axis({
+        'name': 'Frequency [Hz]',
+        'log_base': 10,
+        'min': float(f_grid[0]),
+        'max': float(f_grid[-1]),
+        'major_gridlines': {'visible': True, 'line': {'color': '#D0D0D0'}},
+        'minor_gridlines': {'visible': True, 'line': {'color': '#E0E0E0'}}
+    })
+    chart.set_y_axis({
+        'name': 'Impedance |Z_c| [Ω]',
+        'log_base': 10,
+        'major_gridlines': {'visible': True, 'line': {'color': '#D0D0D0'}},
+        'minor_gridlines': {'visible': True, 'line': {'color': '#E0E0E0'}}
+    })
+
+    # 凡例
+    chart.set_legend({'position': 'right'})
+
+    # グラフサイズと位置
+    chart.set_size({'width': 800, 'height': 600})
+
+    # チャートをシートに挿入（左側）
+    chart_sheet.insert_chart('B2', chart)
+
+
+def create_impedance_chart(workbook, chart_sheet, data_sheet,
+                          results: Dict, config: UserConfig):
+    """PDNインピーダンスグラフを作成"""
+
+    # グラフ作成
+    chart = workbook.add_chart({'type': 'scatter', 'subtype': 'straight'})
+
     # データ範囲
     top_k = results.get('top_k_results', [])
     f_grid = ensure_numpy(results.get('frequency_grid', []))
-    
+
     # データ点数（間引き後）
     max_points = 1000
-    n_points = min(len(f_grid), max_points)
-    
+    if len(f_grid) > max_points:
+        step = max(1, len(f_grid) // max_points)
+        n_points = len(list(range(0, len(f_grid), step)))
+    else:
+        n_points = len(f_grid)
+
     # Top-k系列追加
     colors = ZPDN_PALETTE
     top_count = len(top_k[:10])
@@ -376,8 +495,8 @@ def create_impedance_chart(workbook, chart_sheet, data_sheet,
     chart.set_x_axis({
         'name': 'Frequency [Hz]',
         'log_base': 10,
-        'min': config.f_start,
-        'max': config.f_stop,
+        'min': float(f_grid[0]),
+        'max': float(f_grid[-1]),
         'major_gridlines': {'visible': True, 'line': {'color': '#D0D0D0'}},
         'minor_gridlines': {'visible': True, 'line': {'color': '#E0E0E0'}}
     })
@@ -387,15 +506,15 @@ def create_impedance_chart(workbook, chart_sheet, data_sheet,
         'major_gridlines': {'visible': True, 'line': {'color': '#D0D0D0'}},
         'minor_gridlines': {'visible': True, 'line': {'color': '#E0E0E0'}}
     })
-    
+
     # 凡例
     chart.set_legend({'position': 'right'})
-    
+
     # グラフサイズと位置
     chart.set_size({'width': 800, 'height': 600})
-    
-    # チャートをシートに挿入
-    chart_sheet.insert_chart('B2', chart)
+
+    # チャートをシートに挿入（右側、Z_cグラフの隣）
+    chart_sheet.insert_chart('N2', chart)
 
 
 def write_config_sheet(worksheet, config: UserConfig, header_format, cell_format):
