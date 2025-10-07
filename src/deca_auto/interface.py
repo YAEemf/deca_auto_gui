@@ -225,15 +225,12 @@ def create_sidebar():
                     logger.error(f"設定ファイル読み込みエラー: {e}")
         
         # 保存ボタン
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button(get_localized_text('save', config)):
-                save_current_config()
-        
-        with col2:
-            save_as_name = st.text_input("ファイル名", "config.toml")
-            if st.button(get_localized_text('save_as', config)):
-                save_current_config(save_as_name)
+        if st.button(get_localized_text('save', config)):
+            save_current_config()
+    
+        save_as_name = st.text_input("ファイル名", "config.toml")
+        if st.button(get_localized_text('save_as', config)):
+            save_current_config(save_as_name)
         
         st.divider()
         
