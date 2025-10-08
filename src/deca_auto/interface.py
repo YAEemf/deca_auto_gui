@@ -269,7 +269,6 @@ def create_sidebar():
 
                     # ファイルアップローダーをリセット
                     st.session_state.file_upload_key += 1
-                    st.rerun()
                 except Exception as e:
                     st.error(f"読み込みエラー: {e}")
                     logger.error(f"設定ファイル読み込みエラー: {e}")
