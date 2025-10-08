@@ -161,9 +161,6 @@ def initialize_session_state():
 
     if 'active_tab' not in st.session_state:
         st.session_state.active_tab = 0  # 0: Settings, 1: Results
-    
-    if 'file_upload_key' not in st.session_state:
-        st.session_state.file_upload_key = 0  # ファイルアップローダーのキー
 
     if 'last_uploaded_file' not in st.session_state:
         st.session_state.last_uploaded_file = None  # 前回のアップロードファイル名
@@ -238,12 +235,12 @@ def create_sidebar():
         # ファイル操作
         st.header(get_localized_text("load_file", config))
         
-        # ファイルアップロード
+        # ファイルアップロード（固定キーを使用）
         uploaded_file = st.file_uploader(
             get_localized_text('load_config', config),
             type=['toml'],
             help=get_localized_text('drop_config', config),
-            key=f"file_uploader_{st.session_state.file_upload_key}"
+            key="config_file_uploader"  # 固定キーに変更
         )
         
         if uploaded_file is not None:
@@ -267,8 +264,8 @@ def create_sidebar():
                     # アップロードファイル名を記録
                     st.session_state.last_uploaded_file = current_file_name
 
-                    # ファイルアップローダーをリセット
-                    st.session_state.file_upload_key += 1
+                    # ★ file_upload_keyのインクリメントを削除
+                    # これにより、file_uploaderのウィジェット状態が保持されます
                 except Exception as e:
                     st.error(f"読み込みエラー: {e}")
                     logger.error(f"設定ファイル読み込みエラー: {e}")
@@ -302,7 +299,7 @@ def create_sidebar():
         
         st.divider()
         
-        # パラメーター設定（エクスパンダー）
+        # パラメーター設定(エクスパンダー)
         
         # 周波数グリッド
         with st.expander(get_localized_text('frequency_grid', config)):
@@ -369,7 +366,7 @@ def create_sidebar():
                 value=config.shuffle_evaluation
             )
 
-        # 評価重み（フラグメント化して軽量化）
+        # 評価重み(フラグメント化して軽量化)
         render_weights_section()
         
         # Monte Carlo設定
@@ -534,29 +531,15 @@ def create_sidebar():
             sel = st.session_state["_lang_display"]
             st.session_state.config.language = "jp" if sel == "日本語" else "en"
 
-        # def _on_change_theme():
-        #     sel = st.session_state["_theme_display"]
-        #     st.session_state.config.dark_theme = (sel == "Dark Theme")
-
         with st.expander(get_localized_text('system', st.session_state.config)):
             current_lang_display = "日本語" if st.session_state.config.language == "jp" else "English"
             lang = st.selectbox(
                 get_localized_text('language', st.session_state.config),
                 options=["日本語", "English"],
-                index=["日本語", "English"].index(current_lang_display),   # 現在のGUI言語を既定表示に
+                index=["日本語", "English"].index(current_lang_display),
                 key="_lang_display",
                 on_change=_on_change_language
             )
-
-            # current_theme_display = "Dark Theme" if getattr(st.session_state.config, "dark_theme", False) else "Light Theme"
-
-            # theme_choice = st.selectbox(
-            #     get_localized_text('theme', st.session_state.config),
-            #     options=["Light Theme", "Dark Theme"],
-            #     index=["Light Theme", "Dark Theme"].index(current_theme_display),  # 現在適用中のテーマ名を既定表示に
-            #     key="_theme_display",
-            #     on_change=_on_change_theme
-            # )
 
 
 def create_main_content():
@@ -583,18 +566,18 @@ def create_settings_tab():
     config = st.session_state.config
     
     # st.header(get_localized_text('settings', config))
-    
+
     # コンデンサリスト
     st.subheader(get_localized_text('capacitor_list', config))
 
-    # データフレーム作成（コンデンサリストをテーブル表示用に変換）
+    # データフレーム作成(コンデンサリストをテーブル表示用に変換)
     cap_data = []
     for cap in config.capacitors:
-        # pathの取得（空の場合はRLCモード）
+        # pathの取得(空の場合はRLCモード)
         path = cap.get('path', "") or ""
         has_path = bool(path)
 
-        # RLCモードの場合はデフォルト値、SPICEモードの場合は設定値（なければ0）
+        # RLCモードの場合はデフォルト値、SPICEモードの場合は設定値(なければ0)
         c_val = cap.get('C', 0.0 if not has_path else 0.0)
         esr_val = cap.get('ESR', 15e-3 if not has_path else 0.0)
         esl_val = cap.get('ESL', 0.5e-9 if not has_path else 0.0)
@@ -631,7 +614,7 @@ def create_settings_tab():
             if not name_val:
                 continue
 
-            # path の処理（空文字列を許容、None は空文字列に変換）
+            # path の処理(空文字列を許容、None は空文字列に変換)
             path_val = str(row['Path']).strip() if row['Path'] else ""
 
             # path が空の場合はRLCモードとしてデフォルト値を使用
@@ -658,7 +641,7 @@ def create_settings_tab():
                 st.error(str(exc))
                 return
 
-            # コンデンサ辞書を構築（None を含めない）
+            # コンデンサ辞書を構築(None を含めない)
             cap = {'name': name_val}
 
             if path_val:
@@ -683,13 +666,12 @@ def create_settings_tab():
         config.capacitors = new_caps
         st.success(get_localized_text("update_caplist", config))
 
-    # 以下略
     st.divider()
     
     # 目標マスク設定
     st.subheader(get_localized_text('target_mask', config))
     
-    # カスタムマスクの確認（TOMLから読み込まれている場合も考慮）
+    # カスタムマスクの確認(TOMLから読み込まれている場合も考慮)
     has_custom_mask = config.z_custom_mask is not None and len(config.z_custom_mask) > 0
     
     use_custom = st.checkbox(
@@ -762,12 +744,12 @@ def create_settings_tab():
 @st.fragment
 def render_zpdn_results():
     """
-    PDN結果表示（グラフとテーブル）をフラグメント化
+    PDN結果表示(グラフとテーブル)をフラグメント化
 
-    このフラグメントは以下を実現：
+    このフラグメントは以下を実現:
     1. Top-kグラフの表示
     2. チェックボックスでのグラフ表示制御
-    3. チェック変更時の即座な反映（フラグメント内での再実行）
+    3. チェック変更時の即座な反映(フラグメント内での再実行)
 
     Note:
         @st.fragment により、このセクションのみを部分的に再実行可能
@@ -815,7 +797,7 @@ def render_zpdn_results():
                 # 変更があった場合のみsession_stateを更新してフラグメントを再実行
                 if new_flags != st.session_state.top_k_show_flags:
                     st.session_state.top_k_show_flags = new_flags
-                    st.rerun(scope="fragment")  # フラグメントのみを再実行（高速）
+                    st.rerun(scope="fragment")  # フラグメントのみを再実行(高速)
         except Exception as e:
             st.error(f"テーブル作成エラー: {e}")
 
@@ -832,9 +814,9 @@ def create_results_tab():
         graph2_placeholder = st.empty()
         table_placeholder = st.empty()
 
-        # ポーリングループ（0.5秒ごと）
+        # ポーリングループ(0.5秒ごと)
         import time
-        max_iterations = 1000  # 最大500秒（約8分）
+        max_iterations = 1000  # 最大500秒(約8分)
 
         for i in range(max_iterations):
             # キューを処理
@@ -960,7 +942,7 @@ def create_zc_chart() -> alt.Chart:
 
     df = pd.DataFrame(data_list)
 
-    # X軸のスケール設定（domainで範囲を固定）
+    # X軸のスケール設定(domainで範囲を固定)
     x_scale = alt.Scale(type='log', base=10)
     if f_min is not None and f_max is not None:
         x_scale = alt.Scale(type='log', base=10, domain=[f_min, f_max])
@@ -1079,7 +1061,7 @@ def create_zpdn_chart() -> alt.Chart:
     top_k_types = [t for t in actual_types if t.startswith('Top-')]
     other_types = [t for t in actual_types if not t.startswith('Top-')]
 
-    # Top-kをソート（Top-1, Top-2, ...の順）
+    # Top-kをソート(Top-1, Top-2, ...の順)
     top_k_types.sort(key=lambda x: int(x.split('-')[1]))
 
     # color_domainとcolor_rangeを構築
@@ -1089,7 +1071,7 @@ def create_zpdn_chart() -> alt.Chart:
     # Top-k候補を追加
     for i, t in enumerate(top_k_types):
         color_domain.append(t)
-        # ZPDN_PALETTEから対応する色を取得（Top-1はindex 0、Top-2はindex 1...）
+        # ZPDN_PALETTEから対応する色を取得(Top-1はindex 0、Top-2はindex 1...)
         top_index = int(t.split('-')[1]) - 1
         color_range.append(ZPDN_PALETTE[top_index % len(ZPDN_PALETTE)])
 
@@ -1101,7 +1083,7 @@ def create_zpdn_chart() -> alt.Chart:
         color_domain.append('Target Mask')
         color_range.append(TARGET_MASK_COLOR)
 
-    # X軸のスケール設定（domainで範囲を固定）
+    # X軸のスケール設定(domainで範囲を固定)
     x_scale = alt.Scale(type='log', base=10, domain=[f_min, f_max])
 
     chart = alt.Chart(df).mark_line(clip=True).encode(
@@ -1251,7 +1233,7 @@ def optimization_worker(config: UserConfig, result_queue: queue.Queue, stop_even
         # 最適化実行
         results = run_optimization(config, gui_callback, stop_event)
         
-        # 完了通知（結果を含める）
+        # 完了通知(結果を含める)
         result_queue.put({
             'type': 'complete',
             'results': results
@@ -1388,7 +1370,7 @@ def process_result_queue():
                 # コンデンサインピーダンス更新
                 st.session_state.capacitor_impedances[data['name']] = data['z_c']
                 
-                # 周波数グリッドも更新（初回のみ）
+                # 周波数グリッドも更新(初回のみ)
                 if 'frequency' in data and st.session_state.frequency_grid is None:
                     st.session_state.frequency_grid = data['frequency']
             
