@@ -271,11 +271,11 @@ def create_sidebar():
                     logger.error(f"設定ファイル読み込みエラー: {e}")
         
         # 保存ボタン
-        if st.button(get_localized_text('save', config)):
+        if st.button(get_localized_text('save', config), width="stretch"):
             save_current_config()
     
         save_as_name = st.text_input("ファイル名", "config.toml")
-        if st.button(get_localized_text('save_as', config)):
+        if st.button(get_localized_text('save_as', config), width="stretch"):
             save_current_config(save_as_name)
         
         st.divider()
@@ -284,14 +284,14 @@ def create_sidebar():
         col1, col2 = st.columns(2)
         with col1:
             if not st.session_state.optimization_running:
-                if st.button(get_localized_text('start_search', config), type="primary"):
+                if st.button(get_localized_text('start_search', config), type="primary", width="stretch"):
                     start_optimization()
                 with col2:
                     if not st.session_state.optimization_running:
-                        if st.button(get_localized_text('calculate_zc_only', config)):
+                        if st.button(get_localized_text('calculate_zc_only', config), width="stretch"):
                             calculate_zc_only()
             else:
-                if st.button(get_localized_text('stop_search', config), type="secondary"):
+                if st.button(get_localized_text('stop_search', config), type="secondary", width="stretch"):
                     stop_optimization()
 
         if st.session_state.stop_requested:
