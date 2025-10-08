@@ -398,10 +398,9 @@ def run_optimization(config: UserConfig,
         if cap_config and 'C' in cap_config and cap_config['C'] is not None:
             capacitances.append(to_float(cap_config['C'], 1e-6))
         else:
-            # インピーダンスから容量推定（NumPyで実行）
-            z_c = cap_impedances[name]
-            z_c_np = ensure_numpy(z_c) if xp is not np else z_c
-            f_grid_np = ensure_numpy(f_grid) if xp is not np else f_grid
+            # インピーダンスから容量推定（CPUで実行）
+            z_c_np = ensure_numpy(cap_impedances[name])
+            f_grid_np = ensure_numpy(f_grid)
             omega = 2 * np.pi * f_grid_np
             omega_imag = omega * np.imag(z_c_np)
             omega_imag = np.where(np.abs(omega_imag) < 1e-30, 1e-30, omega_imag)

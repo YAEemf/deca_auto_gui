@@ -178,6 +178,56 @@ def initialize_session_state():
         st.session_state.top_k_show_flags = []
 
 
+@st.fragment
+def render_weights_section():
+    """
+    評価重みセクションをフラグメント化
+
+    このフラグメントにより、評価重みのスライダー操作時に
+    メインコンテンツ全体を再実行せず、このセクションのみを再実行することで
+    GUIのレスポンスを大幅に向上
+
+    Note:
+        各スライダーには一意のkeyを設定してStreamlitの重複キーエラーを回避
+        キー命名規則: sidebar_weights_{widget_type}_{parameter_name}
+    """
+    config = st.session_state.config
+
+    with st.expander(get_localized_text('weights', config) if config.language == 'jp' else 'Evaluation Weights', expanded=True):
+        defaults = UserConfig()
+        weight_fields = [
+            'weight_max', 'weight_area', 'weight_mean', 'weight_anti',
+            'weight_flat', 'weight_under', 'weight_parts',
+            'weight_num_types', 'weight_resonance', 'weight_mc_worst'
+        ]
+
+        col1, col2 = st.columns(2)
+        with col1:
+            config.weight_max = st.slider("Max", 0.0, 1.0, config.weight_max, 0.05, key="sidebar_weights_slider_max")
+            config.weight_area = st.slider("Area", 0.0, 1.0, config.weight_area, 0.05, key="sidebar_weights_slider_area")
+            config.weight_anti = st.slider("Anti-resonance", 0.0, 1.0, config.weight_anti, 0.05, key="sidebar_weights_slider_anti")
+            config.weight_parts = st.slider("Parts", 0.0, 2.0, config.weight_parts, 0.05, key="sidebar_weights_slider_parts")
+            config.weight_flat = st.slider("Flatness", 0.0, 1.0, config.weight_flat, 0.05, key="sidebar_weights_slider_flat")
+        with col2:
+            config.weight_mean = st.slider("Mean", 0.0, 1.0, config.weight_mean, 0.05, key="sidebar_weights_slider_mean")
+            config.weight_under = st.slider("Under", -1.0, 1.0, config.weight_under, 0.05, key="sidebar_weights_slider_under")
+            config.weight_resonance = st.slider('Resonance', 0.0, 1.0, config.weight_resonance, 0.05, key="sidebar_weights_slider_resonance")
+            config.weight_num_types = st.slider('Types', 0.0, 1.0, config.weight_num_types, 0.05, key="sidebar_weights_slider_num_types")
+            config.weight_mc_worst = st.slider("MC worst", 0.0, 1.0, config.weight_mc_worst, 0.05, key="sidebar_weights_slider_mc_worst")
+
+        config.ignore_safe_anti_resonance = st.checkbox(
+            get_localized_text('ignore_safe_anti', config),
+            value=config.ignore_safe_anti_resonance,
+            key="sidebar_weights_checkbox_ignore_safe_anti"
+        )
+
+        if st.button(get_localized_text('reset_weights', config), use_container_width=True, key="sidebar_weights_button_reset"):
+            for field in weight_fields:
+                setattr(config, field, getattr(defaults, field))
+            config.ignore_safe_anti_resonance = defaults.ignore_safe_anti_resonance
+            st.rerun(scope="fragment")
+
+
 def create_sidebar():
     """サイドバーの作成"""
     config = st.session_state.config
@@ -320,38 +370,8 @@ def create_sidebar():
                 value=config.shuffle_evaluation
             )
 
-        # 評価重み
-        with st.expander(get_localized_text('weights', config) if config.language == 'jp' else 'Evaluation Weights', expanded=True):
-            defaults = UserConfig()
-            weight_fields = [
-                'weight_max', 'weight_area', 'weight_mean', 'weight_anti',
-                'weight_flat', 'weight_under', 'weight_parts',
-                'weight_num_types', 'weight_resonance', 'weight_mc_worst'
-            ]
-
-            col1, col2 = st.columns(2)
-            with col1:
-                config.weight_max = st.slider("Max", 0.0, 1.0, config.weight_max, 0.05)
-                config.weight_area = st.slider("Area", 0.0, 1.0, config.weight_area, 0.05)
-                config.weight_anti = st.slider("Anti-resonance", 0.0, 1.0, config.weight_anti, 0.05)
-                config.weight_parts = st.slider("Parts", 0.0, 2.0, config.weight_parts, 0.05)
-                config.weight_flat = st.slider("Flatness", 0.0, 1.0, config.weight_flat, 0.05)
-            with col2:
-                config.weight_mean = st.slider("Mean", 0.0, 1.0, config.weight_mean, 0.05)
-                config.weight_under = st.slider("Under", -1.0, 1.0, config.weight_under, 0.05)
-                config.weight_resonance = st.slider('Resonance', 0.0, 1.0, config.weight_resonance, 0.05)    # get_localized_text('weight_resonance', config)
-                config.weight_num_types = st.slider('Types', 0.0, 1.0, config.weight_num_types, 0.05)    # get_localized_text('weight_num_types', config)
-                config.weight_mc_worst = st.slider("MC worst", 0.0, 1.0, config.weight_mc_worst, 0.05)
-
-            config.ignore_safe_anti_resonance = st.checkbox(
-                    get_localized_text('ignore_safe_anti', config),
-                    value=config.ignore_safe_anti_resonance
-                )
-
-            if st.button(get_localized_text('reset_weights', config), use_container_width=True):
-                for field in weight_fields:
-                    setattr(config, field, getattr(defaults, field))
-                config.ignore_safe_anti_resonance = defaults.ignore_safe_anti_resonance
+        # 評価重み（フラグメント化して軽量化）
+        render_weights_section()
         
         # Monte Carlo設定
         with st.expander(get_localized_text('monte_carlo', config)):
@@ -715,12 +735,71 @@ def create_settings_tab():
                     st.error("有効なマスクポイントがありません")
 
 
+@st.fragment
+def render_zpdn_results():
+    """
+    PDN結果表示（グラフとテーブル）をフラグメント化
+
+    このフラグメントは以下を実現：
+    1. Top-kグラフの表示
+    2. チェックボックスでのグラフ表示制御
+    3. チェック変更時の即座な反映（フラグメント内での再実行）
+
+    Note:
+        @st.fragment により、このセクションのみを部分的に再実行可能
+        チェックボックスの変更検知時にst.rerun(scope="fragment")を使用して
+        全体ではなくフラグメント内のみを再実行し、パフォーマンスを向上
+    """
+    config = st.session_state.config
+
+    # グラフ2: Top-kのZ_pdn特性
+    st.subheader("PDNインピーダンス特性 |Z_pdn| (Top-k)")
+    if st.session_state.top_k_results and st.session_state.frequency_grid is not None:
+        try:
+            zpdn_chart = create_zpdn_chart()
+            st.altair_chart(zpdn_chart, use_container_width=True)
+        except Exception as e:
+            st.error(f"グラフ描画エラー: {e}")
+    else:
+        st.info("探索を実行してください")
+
+    # Top-k結果テーブル
+    if st.session_state.top_k_results:
+        st.subheader("Top-k 結果")
+        try:
+            results_df = create_results_dataframe(include_show=True)
+            edited_df = st.data_editor(
+                results_df,
+                use_container_width=True,
+                hide_index=True,
+                key="topk_selector",
+                column_config={
+                    'show': st.column_config.CheckboxColumn(
+                        get_localized_text('show_column', config),
+                        help=get_localized_text('show_column_help', config)
+                    )
+                },
+                disabled=['Rank', 'Combination', 'Total Score', 'Types', 'Parts', 'MC Worst']
+            )
+
+            # チェックボックスの状態変更を検知してグラフを即座に更新
+            if len(edited_df) == len(st.session_state.top_k_results):
+                new_flags = [
+                    False if pd.isna(val) else bool(val)
+                    for val in edited_df['show'].tolist()
+                ]
+                # 変更があった場合のみsession_stateを更新してフラグメントを再実行
+                if new_flags != st.session_state.top_k_show_flags:
+                    st.session_state.top_k_show_flags = new_flags
+                    st.rerun(scope="fragment")  # フラグメントのみを再実行（高速）
+        except Exception as e:
+            st.error(f"テーブル作成エラー: {e}")
+
+
 def create_results_tab():
     """結果タブの内容"""
     config = st.session_state.config
-    
-    # st.header(get_localized_text('results', config))
-    
+
     # 最適化実行中の場合、自動更新を有効化
     if st.session_state.optimization_running:
         # 定期的な更新のためのプレースホルダー
@@ -728,15 +807,15 @@ def create_results_tab():
         graph1_placeholder = st.empty()
         graph2_placeholder = st.empty()
         table_placeholder = st.empty()
-        
+
         # ポーリングループ（0.5秒ごと）
         import time
         max_iterations = 1000  # 最大500秒（約8分）
-        
+
         for i in range(max_iterations):
             # キューを処理
             process_result_queue()
-            
+
             # プログレス表示
             with progress_placeholder.container():
                 col1, col2 = st.columns([3, 1])
@@ -749,7 +828,7 @@ def create_results_tab():
                         st.markdown(f"**{pct}%**", help="進捗率")
                 with col2:
                     st.info("🔄 最適化実行中...")
-            
+
             # グラフ1: コンデンサのZ_c特性
             with graph1_placeholder.container():
                 st.subheader("コンデンサインピーダンス特性 |Z_c|")
@@ -761,7 +840,7 @@ def create_results_tab():
                         st.error(f"グラフ描画エラー: {e}")
                 else:
                     st.info("コンデンサのインピーダンス計算中...")
-            
+
             # グラフ2: Top-kのZ_pdn特性
             with graph2_placeholder.container():
                 st.subheader("PDNインピーダンス特性 |Z_pdn|")
@@ -773,7 +852,7 @@ def create_results_tab():
                         st.error(f"グラフ描画エラー: {e}")
                 else:
                     st.info("探索実行中...")
-            
+
             # Top-k結果テーブル
             with table_placeholder.container():
                 if st.session_state.top_k_results:
@@ -783,7 +862,7 @@ def create_results_tab():
                         st.dataframe(results_df, use_container_width=True)
                     except Exception as e:
                         st.error(f"テーブル作成エラー: {e}")
-            
+
             # 最適化が完了したらループを抜ける
             if not st.session_state.optimization_running:
                 with progress_placeholder.container():
@@ -797,10 +876,10 @@ def create_results_tab():
                         st.success("✅ 最適化完了")
                 st.rerun()
                 break
-            
+
             # 0.5秒待機
             time.sleep(0.5)
-    
+
     else:
         # 最適化実行中でない場合は通常の表示
         # グラフ1: コンデンサのZ_c特性
@@ -816,47 +895,8 @@ def create_results_tab():
 
         st.divider()
 
-        # グラフ2: Top-kのZ_pdn特性
-        st.subheader("PDNインピーダンス特性 |Z_pdn| (Top-k)")
-        if st.session_state.top_k_results and st.session_state.frequency_grid is not None:
-            try:
-                zpdn_chart = create_zpdn_chart()
-                st.altair_chart(zpdn_chart, use_container_width=True)
-            except Exception as e:
-                st.error(f"グラフ描画エラー: {e}")
-        else:
-            st.info("探索を実行してください")
-
-        # Top-k結果テーブル
-        if st.session_state.top_k_results:
-            st.subheader("Top-k 結果")
-            try:
-                results_df = create_results_dataframe(include_show=True)
-                edited_df = st.data_editor(
-                    results_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    key="topk_selector",
-                    column_config={
-                        'show': st.column_config.CheckboxColumn(
-                            get_localized_text('show_column', config),
-                            help=get_localized_text('show_column_help', config)
-                        )
-                    },
-                    disabled=['Rank', 'Combination', 'Total Score', 'Types', 'Parts', 'MC Worst']
-                )
-
-                # 編集があった場合、show_flagsを更新
-                if len(edited_df) == len(st.session_state.top_k_results):
-                    new_flags = [
-                        False if pd.isna(val) else bool(val)
-                        for val in edited_df['show'].tolist()
-                    ]
-                    # 変更があった場合のみ更新
-                    if new_flags != st.session_state.top_k_show_flags:
-                        st.session_state.top_k_show_flags = new_flags
-            except Exception as e:
-                st.error(f"テーブル作成エラー: {e}")
+        # フラグメント化されたPDN結果表示
+        render_zpdn_results()
 
 
 def create_zc_chart() -> alt.Chart:
