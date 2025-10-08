@@ -22,7 +22,7 @@ from deca_auto.utils import (
     get_dtype, ensure_numpy, to_float
 )
 from deca_auto.capacitor import calculate_all_capacitor_impedances
-from deca_auto.pdn import calculate_pdn_impedance_batch
+from deca_auto.pdn import calculate_pdn_impedance_batch, prepare_pdn_components
 from deca_auto.evaluator import evaluate_combinations, extract_top_k, monte_carlo_evaluation
 from deca_auto.excel_out import export_to_excel
 
@@ -51,6 +51,7 @@ class OptimizationContext:
     chunk_size_limit: int
     capacitor_impedances: Dict[str, np.ndarray]
     capacitor_indices: np.ndarray
+    pdn_assets: Dict[str, Any]
     top_k_results: List[Dict]
     stop_flag: bool = False
     gui_callback: Optional[Callable] = None
@@ -214,7 +215,8 @@ def process_chunk(ctx: OptimizationContext,
         ctx.capacitor_indices,
         ctx.f_grid,
         ctx.config,
-        xp
+        xp,
+        prepared=ctx.pdn_assets,
     )
 
     if ctx.stop_event and ctx.stop_event.is_set():
@@ -255,13 +257,16 @@ def process_chunk(ctx: OptimizationContext,
             ctx.eval_mask,
             ctx.target_mask,
             ctx.config,
-            xp
+            xp,
+            ctx.pdn_assets,
         )
         
         # MC最悪値をスコアに反映
+        mc_scores_host = transfer_to_device(mc_scores, np) if ctx.is_gpu else mc_scores
         for i, result in enumerate(chunk_top_k):
-            result['mc_worst_score'] = mc_scores[i]
-            result['total_score'] += ctx.config.weight_mc_worst * mc_scores[i]
+            mc_value = float(mc_scores_host[i])
+            result['mc_worst_score'] = mc_value
+            result['total_score'] += ctx.config.weight_mc_worst * mc_value
     
     # CPUに転送（必要な場合）
     if ctx.is_gpu:
@@ -411,6 +416,9 @@ def run_optimization(config: UserConfig,
     sorted_indices = np.argsort(capacitances)
     sorted_cap_names = [capacitor_names[i] for i in sorted_indices]
     sorted_cap_impedances = {name: cap_impedances[name] for name in sorted_cap_names}
+    pdn_assets = prepare_pdn_components(sorted_cap_impedances, config, f_grid, xp, dtype_c)
+    if pdn_assets.get('cap_names') != tuple(sorted_cap_names):
+        pdn_assets['cap_names'] = tuple(sorted_cap_names)
     
     logger.info(f"コンデンサ順序（容量小→大）: {sorted_cap_names}")
     
@@ -429,6 +437,7 @@ def run_optimization(config: UserConfig,
         chunk_size_limit=chunk_size_limit,
         capacitor_impedances=sorted_cap_impedances,
         capacitor_indices=xp.arange(len(sorted_cap_names)),
+        pdn_assets=pdn_assets,
         top_k_results=[],
         gui_callback=gui_callback,
         stop_event=stop_event,
@@ -447,6 +456,7 @@ def run_optimization(config: UserConfig,
             ctx.f_grid,
             ctx.config,
             xp,
+            prepared=ctx.pdn_assets,
         )[0]
         z_without_decap_np = transfer_to_device(z_without_decap, np)
         ctx.z_without_decap = z_without_decap_np

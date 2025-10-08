@@ -32,26 +32,35 @@ def _prepare_capacitor_arrays(
         raise ValueError("コンデンサインピーダンス辞書が空です")
 
     z_cap_array = xp.stack([capacitor_impedances[name] for name in cap_names])
+    target_dtype = None
     if dtype is not None:
-        z_cap_array = z_cap_array.astype(dtype, copy=False)
+        target_dtype = np.dtype(dtype)
+        z_cap_array = z_cap_array.astype(target_dtype, copy=False)
+    else:
+        target_dtype = z_cap_array.dtype
 
-    # マウントインダクタンス配列を構築（個別指定があれば優先）
-    z_mnt_default = parasitic_elements['z_mntN']
     if omega is None:
         omega = parasitic_elements.get('omega')
     if omega is None:
         raise ValueError("omega が取得できませんでした")
 
+    omega_backend = xp.asarray(omega)
     config_map = _build_config_lookup(config)
-    z_mnt_array = xp.empty_like(z_cap_array)
-    for idx, name in enumerate(cap_names):
+    default_l_mnt = float(getattr(config, 'L_mntN', 0.0))
+    l_mnt_values = []
+    for name in cap_names:
         cap_cfg = config_map.get(name)
         if cap_cfg and cap_cfg.get('L_mnt') is not None:
-            z_mnt_array[idx] = xp.asarray(1j * omega * cap_cfg['L_mnt'], dtype=z_cap_array.dtype)
+            l_mnt_values.append(float(cap_cfg['L_mnt']))
         else:
-            z_mnt_array[idx] = xp.asarray(z_mnt_default, dtype=z_cap_array.dtype)
+            l_mnt_values.append(default_l_mnt)
 
-    return cap_names, z_cap_array, z_mnt_array, omega
+    l_mnt_array = xp.asarray(l_mnt_values, dtype=omega_backend.dtype)
+    z_mnt_array = (1j * omega_backend)[xp.newaxis, :] * l_mnt_array[:, xp.newaxis]
+    if target_dtype is not None:
+        z_mnt_array = z_mnt_array.astype(target_dtype, copy=False)
+
+    return cap_names, z_cap_array, z_mnt_array, omega_backend
 
 
 def calculate_pdn_parasitic_elements(f_grid: np.ndarray, config: UserConfig,
@@ -116,6 +125,47 @@ def calculate_pdn_parasitic_elements(f_grid: np.ndarray, config: UserConfig,
         'y_p': y_p,
         'z_mntN': z_mntN,
         'omega': omega  # omegaも保存
+    }
+
+
+def prepare_pdn_components(
+    capacitor_impedances: Dict[str, np.ndarray],
+    config: UserConfig,
+    f_grid: np.ndarray,
+    xp: Any = np,
+    dtype: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """
+    PDN計算で再利用できる要素を事前計算
+
+    Args:
+        capacitor_impedances: コンデンサインピーダンス辞書
+        config: ユーザー設定
+        f_grid: 周波数グリッド
+        xp: バックエンドモジュール
+        dtype: ターゲットデータ型
+
+    Returns:
+        辞書形式の事前計算データ
+    """
+    target_dtype = np.dtype(dtype) if dtype is not None else np.dtype(getattr(config, 'dtype_c', 'complex64'))
+    parasitic_elements = calculate_pdn_parasitic_elements(f_grid, config, xp, target_dtype)
+    cap_names, z_cap_array, z_mnt_array, omega = _prepare_capacitor_arrays(
+        capacitor_impedances,
+        config,
+        parasitic_elements,
+        xp,
+        parasitic_elements.get('omega'),
+        target_dtype,
+    )
+
+    return {
+        'cap_names': cap_names,
+        'z_cap_array': z_cap_array,
+        'z_mnt_array': z_mnt_array,
+        'parasitic_elements': parasitic_elements,
+        'omega': omega,
+        'dtype': target_dtype,
     }
 
 
@@ -208,7 +258,8 @@ def calculate_pdn_impedance_batch(count_vectors: np.ndarray,
                                  capacitor_indices: np.ndarray,
                                  f_grid: np.ndarray,
                                  config: UserConfig,
-                                 xp: Any = np) -> np.ndarray:
+                                 xp: Any = np,
+                                 prepared: Optional[Dict[str, Any]] = None) -> np.ndarray:
     """
     PDNインピーダンスをバッチ計算（GPU最適化）
     
@@ -223,17 +274,22 @@ def calculate_pdn_impedance_batch(count_vectors: np.ndarray,
     Returns:
         Z_pdn配列 (N_batch, N_freq)
     """
-    target_dtype = np.dtype(getattr(config, 'dtype_c', 'complex64'))
-    parasitic_elements = calculate_pdn_parasitic_elements(f_grid, config, xp, target_dtype)
-    cap_names, z_cap_array, z_mnt_array, _ = _prepare_capacitor_arrays(
-        capacitor_impedances,
-        config,
-        parasitic_elements,
-        xp,
-        parasitic_elements.get('omega', 2 * xp.pi * f_grid),
-        target_dtype,
-    )
-    _ = cap_names  # 順序維持の意図を明示
+    if prepared is not None:
+        parasitic_elements = prepared['parasitic_elements']
+        z_cap_array = prepared['z_cap_array']
+        z_mnt_array = prepared['z_mnt_array']
+    else:
+        target_dtype = np.dtype(getattr(config, 'dtype_c', 'complex64'))
+        parasitic_elements = calculate_pdn_parasitic_elements(f_grid, config, xp, target_dtype)
+        cap_names, z_cap_array, z_mnt_array, _ = _prepare_capacitor_arrays(
+            capacitor_impedances,
+            config,
+            parasitic_elements,
+            xp,
+            parasitic_elements.get('omega', 2 * xp.pi * f_grid),
+            target_dtype,
+        )
+        _ = cap_names  # 順序維持の意図を明示
 
     z_pdn_batch = _pdn_impedance_core(
         count_vectors,
@@ -255,7 +311,8 @@ def calculate_pdn_impedance_monte_carlo(count_vector: np.ndarray,
                                        f_grid: np.ndarray,
                                        config: UserConfig,
                                        n_samples: int,
-                                       xp: Any = np) -> np.ndarray:
+                                       xp: Any = np,
+                                       prepared: Optional[Dict[str, Any]] = None) -> np.ndarray:
     """
     Monte Carlo法でPDNインピーダンスを計算（ロバスト性評価）
     
@@ -283,16 +340,21 @@ def calculate_pdn_impedance_monte_carlo(count_vector: np.ndarray,
         rng = xp.random.RandomState(config.seed)
         normal = lambda loc, scale, size: rng.normal(loc, scale, size=size, dtype=xp.float32)
 
-    target_dtype = np.dtype(getattr(config, 'dtype_c', 'complex64'))
-    parasitic_elements = calculate_pdn_parasitic_elements(f_grid, config, xp, target_dtype)
-    _, z_cap_base, z_mnt_array, _ = _prepare_capacitor_arrays(
-        capacitor_impedances,
-        config,
-        parasitic_elements,
-        xp,
-        parasitic_elements.get('omega'),
-        target_dtype,
-    )
+    if prepared is not None:
+        parasitic_elements = prepared['parasitic_elements']
+        z_cap_base = prepared['z_cap_array']
+        z_mnt_array = prepared['z_mnt_array']
+    else:
+        target_dtype = np.dtype(getattr(config, 'dtype_c', 'complex64'))
+        parasitic_elements = calculate_pdn_parasitic_elements(f_grid, config, xp, target_dtype)
+        _, z_cap_base, z_mnt_array, _ = _prepare_capacitor_arrays(
+            capacitor_impedances,
+            config,
+            parasitic_elements,
+            xp,
+            parasitic_elements.get('omega'),
+            target_dtype,
+        )
 
     esr_orig = xp.mean(xp.real(z_cap_base), axis=1)
     z_imag_base = xp.imag(z_cap_base)

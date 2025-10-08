@@ -10,7 +10,7 @@ import numpy as np
 # 絶対パスでインポート
 from deca_auto.config import UserConfig
 from deca_auto.utils import logger, transfer_to_device, safe_divide
-from deca_auto.pdn import calculate_pdn_impedance_monte_carlo
+from deca_auto.pdn import calculate_pdn_impedance_monte_carlo, prepare_pdn_components
 
 
 def calculate_score_components_batch(
@@ -246,22 +246,36 @@ def extract_top_k(z_pdn_batch: np.ndarray,
     if xp is np:
         # NumPyの場合
         if k < n_batch:
-            sorted_indices = np.argpartition(scores, k-1)[:k]
-            sorted_indices = sorted_indices[np.argsort(scores[sorted_indices])]
+            indices = np.argpartition(scores, k - 1)[:k]
+            indices = indices[np.argsort(scores[indices])]
         else:
-            sorted_indices = np.argsort(scores)[:k]
+            indices = np.argsort(scores)[:k]
     else:
-        # CuPyの場合（フルソート使用）
+        # CuPyの場合（フルソート使用）。以降の処理はCPU側で実施
         sorted_indices = xp.argsort(scores)[:k]
+        indices = transfer_to_device(sorted_indices, np)
+
+    indices = np.asarray(indices, dtype=np.int64)
     
     # 結果を構築
     top_k_results = []
-    for idx in sorted_indices:
+    for rank, idx in enumerate(indices, start=1):
+        idx_int = int(idx)
+        if hasattr(scores, '__cuda_array_interface__'):
+            score_value = transfer_to_device(scores[idx_int], np)
+        else:
+            score_value = scores[idx_int]
+
+        if np.isscalar(score_value):
+            score_float = float(score_value)
+        else:
+            score_float = float(np.asarray(score_value).item())
+
         result = {
-            'count_vector': count_vectors[idx],
-            'z_pdn': z_pdn_batch[idx],
-            'total_score': float(scores[idx]),
-            'rank': len(top_k_results) + 1
+            'count_vector': count_vectors[idx_int],
+            'z_pdn': z_pdn_batch[idx_int],
+            'total_score': score_float,
+            'rank': rank
         }
         top_k_results.append(result)
     
@@ -275,7 +289,8 @@ def monte_carlo_evaluation(top_k_results: List[Dict],
                           eval_mask: np.ndarray,
                           target_mask: np.ndarray,
                           config: UserConfig,
-                          xp: Any = np) -> np.ndarray:
+                          xp: Any = np,
+                          pdn_assets: Optional[Dict[str, Any]] = None) -> np.ndarray:
     """
     Monte Carlo法でロバスト性を評価
     
@@ -288,17 +303,27 @@ def monte_carlo_evaluation(top_k_results: List[Dict],
         target_mask: 目標マスク
         config: ユーザー設定
         xp: バックエンドモジュール
+        pdn_assets: 事前計算済みPDN要素（オプション）
     
     Returns:
         MC最悪値スコア配列
     """
     if not config.mc_enable or len(top_k_results) == 0:
-        return xp.zeros(len(top_k_results))
+        return xp.zeros(len(top_k_results), dtype=xp.float32 if xp is not np else np.float32)
     
-    mc_worst_scores = []
+    prepared = pdn_assets if pdn_assets is not None else prepare_pdn_components(
+        capacitor_impedances,
+        config,
+        f_grid,
+        xp,
+        getattr(config, 'dtype_c', 'complex64'),
+    )
+
+    mc_worst_scores: List[float] = []
     
     for result in top_k_results:
         count_vector = result['count_vector']
+        count_vector_backend = xp.asarray(count_vector)
         
         # Monte Carloサンプリング
         z_pdn_mc = calculate_pdn_impedance_monte_carlo(
@@ -308,30 +333,38 @@ def monte_carlo_evaluation(top_k_results: List[Dict],
             f_grid,
             config,
             config.mc_samples,
-            xp
+            xp,
+            prepared=prepared,
         )
         
         # 各サンプルのスコア計算
+        repeated_counts = xp.broadcast_to(
+            count_vector_backend[xp.newaxis, :],
+            (config.mc_samples, count_vector_backend.shape[0])
+        )
         mc_scores = evaluate_combinations(
             z_pdn_mc,
             target_mask,
             eval_mask,
-            xp.tile(count_vector[xp.newaxis, :], (config.mc_samples, 1)),
+            repeated_counts,
             config,
             xp,
             f_grid,
         )
 
         # 最悪値（最大スコア）を記録
-        worst_score = float(xp.max(mc_scores))
+        worst_score_val = transfer_to_device(xp.max(mc_scores), np)
+        worst_score = float(np.asarray(worst_score_val).item() if not np.isscalar(worst_score_val) else worst_score_val)
         mc_worst_scores.append(worst_score)
         
         # 統計情報をログ
-        logger.debug(f"MC評価 - 平均: {xp.mean(mc_scores):.6f}, "
-                    f"最悪: {worst_score:.6f}, "
-                    f"std: {xp.std(mc_scores):.6f}")
+        mean_val = transfer_to_device(xp.mean(mc_scores), np)
+        std_val = transfer_to_device(xp.std(mc_scores), np)
+        mean_float = float(np.asarray(mean_val).item() if not np.isscalar(mean_val) else mean_val)
+        std_float = float(np.asarray(std_val).item() if not np.isscalar(std_val) else std_val)
+        logger.debug(f"MC評価 - 平均: {mean_float:.6f}, 最悪: {worst_score:.6f}, std: {std_float:.6f}")
     
-    return xp.array(mc_worst_scores)
+    return xp.asarray(mc_worst_scores, dtype=xp.float32 if xp is not np else np.float32)
 
 
 def format_combination_name(count_vector: np.ndarray,
