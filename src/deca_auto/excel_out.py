@@ -262,6 +262,7 @@ def write_detail_sheet(worksheet, results: Dict, config: UserConfig,
 
 def write_zc_impedance_data(worksheet, results: Dict, header_format, number_format):
     """Z_cインピーダンスデータを書き込む"""
+    from deca_auto.utils import create_decimated_indices
 
     # ヘッダー
     row = 0
@@ -280,12 +281,7 @@ def write_zc_impedance_data(worksheet, results: Dict, header_format, number_form
     f_grid = ensure_numpy(results.get('frequency_grid', []))
 
     # データを間引く（最大1000点）
-    max_points = 1000
-    if len(f_grid) > max_points:
-        step = max(1, len(f_grid) // max_points)
-        indices = list(range(0, len(f_grid), step))
-    else:
-        indices = list(range(len(f_grid)))
+    indices = create_decimated_indices(len(f_grid), 1000)
 
     # データ行
     for i in indices:
@@ -306,6 +302,7 @@ def write_zc_impedance_data(worksheet, results: Dict, header_format, number_form
 
 def write_impedance_data(worksheet, results: Dict, config: UserConfig, header_format, number_format):
     """PDNインピーダンスデータを書き込む"""
+    from deca_auto.utils import create_decimated_indices
 
     # ヘッダー
     row = 0
@@ -345,13 +342,8 @@ def write_impedance_data(worksheet, results: Dict, config: UserConfig, header_fo
         eval_f_H = config.f_H
 
     # データを間引く（最大1000点）
-    max_points = 1000
-    if len(f_grid) > max_points:
-        step = max(1, len(f_grid) // max_points)
-        indices = list(range(0, len(f_grid), step))
-    else:
-        indices = list(range(len(f_grid)))
-    
+    indices = create_decimated_indices(len(f_grid), 1000)
+
     # データ行
     z_without_np = ensure_numpy(z_without) if has_without else None
 
@@ -385,6 +377,7 @@ def write_impedance_data(worksheet, results: Dict, config: UserConfig, header_fo
 def create_zc_chart(workbook, chart_sheet, zc_data_sheet,
                    results: Dict, config: UserConfig):
     """Z_cインピーダンスグラフを作成"""
+    from deca_auto.utils import create_decimated_indices
 
     # グラフ作成
     chart = workbook.add_chart({'type': 'scatter', 'subtype': 'straight'})
@@ -395,12 +388,8 @@ def create_zc_chart(workbook, chart_sheet, zc_data_sheet,
     f_grid = ensure_numpy(results.get('frequency_grid', []))
 
     # データ点数（間引き後）
-    max_points = 1000
-    if len(f_grid) > max_points:
-        step = max(1, len(f_grid) // max_points)
-        n_points = len(list(range(0, len(f_grid), step)))
-    else:
-        n_points = len(f_grid)
+    indices = create_decimated_indices(len(f_grid), 1000)
+    n_points = len(indices)
 
     # 各コンデンサの系列を追加
     for i, cap_name in enumerate(cap_names_list):
@@ -442,6 +431,7 @@ def create_zc_chart(workbook, chart_sheet, zc_data_sheet,
 def create_impedance_chart(workbook, chart_sheet, data_sheet,
                           results: Dict, config: UserConfig):
     """PDNインピーダンスグラフを作成"""
+    from deca_auto.utils import create_decimated_indices
 
     # グラフ作成
     chart = workbook.add_chart({'type': 'scatter', 'subtype': 'straight'})
@@ -451,12 +441,8 @@ def create_impedance_chart(workbook, chart_sheet, data_sheet,
     f_grid = ensure_numpy(results.get('frequency_grid', []))
 
     # データ点数（間引き後）
-    max_points = 1000
-    if len(f_grid) > max_points:
-        step = max(1, len(f_grid) // max_points)
-        n_points = len(list(range(0, len(f_grid), step)))
-    else:
-        n_points = len(f_grid)
+    indices = create_decimated_indices(len(f_grid), 1000)
+    n_points = len(indices)
 
     # Top-k系列追加
     colors = ZPDN_PALETTE

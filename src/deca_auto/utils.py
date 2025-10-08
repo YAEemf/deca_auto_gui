@@ -693,31 +693,49 @@ def get_progress_bar(iterable, desc: str = None, total: int = None,
 def validate_result(result: Any, name: str = "result") -> bool:
     """
     計算結果の妥当性を検証
-    
+
     Args:
         result: 検証する結果
         name: 結果の名前
-    
+
     Returns:
         bool: 妥当性フラグ
     """
     xp = cp if CUPY_AVAILABLE and hasattr(result, "__cuda_array_interface__") else np
-    
+
     if result is None:
         logger.error(f"{name}がNoneです")
         return False
-    
+
     if hasattr(result, "shape"):
         if result.size == 0:
             logger.error(f"{name}が空です")
             return False
-        
+
         if xp.any(xp.isnan(result)):
             logger.warning(f"{name}にNaNが含まれています")
             return False
-        
+
         if xp.any(xp.isinf(result)):
             logger.warning(f"{name}に無限大が含まれています")
             return False
-    
+
     return True
+
+
+def create_decimated_indices(data_length: int, max_points: int) -> list:
+    """
+    データを間引くためのインデックスリストを作成
+
+    Args:
+        data_length: 元データの長さ
+        max_points: 最大点数
+
+    Returns:
+        間引き後のインデックスリスト
+    """
+    if data_length <= max_points:
+        return list(range(data_length))
+
+    step = max(1, data_length // max_points)
+    return list(range(0, data_length, step))

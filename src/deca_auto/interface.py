@@ -333,14 +333,14 @@ def create_sidebar():
             with col1:
                 config.weight_max = st.slider("Max", 0.0, 1.0, config.weight_max, 0.05)
                 config.weight_area = st.slider("Area", 0.0, 1.0, config.weight_area, 0.05)
-                config.weight_mean = st.slider("Mean", 0.0, 1.0, config.weight_mean, 0.05)
                 config.weight_anti = st.slider("Anti-resonance", 0.0, 1.0, config.weight_anti, 0.05)
-                config.weight_num_types = st.slider('Num types', 0.0, 1.0, config.weight_num_types, 0.05)    # get_localized_text('weight_num_types', config)
-            with col2:
+                config.weight_parts = st.slider("Parts", 0.0, 2.0, config.weight_parts, 0.05)
                 config.weight_flat = st.slider("Flatness", 0.0, 1.0, config.weight_flat, 0.05)
+            with col2:
+                config.weight_mean = st.slider("Mean", 0.0, 1.0, config.weight_mean, 0.05)
                 config.weight_under = st.slider("Under", -1.0, 1.0, config.weight_under, 0.05)
-                config.weight_parts = st.slider("Parts penalty", 0.0, 1.0, config.weight_parts, 0.05)
                 config.weight_resonance = st.slider('Resonance', 0.0, 1.0, config.weight_resonance, 0.05)    # get_localized_text('weight_resonance', config)
+                config.weight_num_types = st.slider('Types', 0.0, 1.0, config.weight_num_types, 0.05)    # get_localized_text('weight_num_types', config)
                 config.weight_mc_worst = st.slider("MC worst", 0.0, 1.0, config.weight_mc_worst, 0.05)
 
             config.ignore_safe_anti_resonance = st.checkbox(
@@ -474,12 +474,35 @@ def create_sidebar():
                 value=config.force_numpy
             )
             if not config.force_numpy:
-                config.cuda = st.number_input(
-                    "CUDA device",
-                    value=config.cuda,
-                    min_value=0,
-                    max_value=7
-                )
+                # CUDA Device選択
+                from deca_auto.utils import list_cuda_devices
+                cuda_devices = list_cuda_devices()
+
+                if cuda_devices:
+                    # デバイスリストから選択肢を作成
+                    device_options = [f"{dev['id']}:{dev['name']}" for dev in cuda_devices]
+                    current_device = config.cuda
+
+                    # 現在のデバイスがリストにあるか確認
+                    if current_device < len(device_options):
+                        selected_index = current_device
+                    else:
+                        selected_index = 0
+                        config.cuda = 0
+
+                    selected_device = st.selectbox(
+                        "CUDA device",
+                        options=device_options,
+                        index=selected_index,
+                        key="cuda_device_selector"
+                    )
+
+                    # 選択されたデバイスIDを取得
+                    config.cuda = int(selected_device.split(':')[0])
+                else:
+                    st.warning("利用可能なCUDA Deviceが見つかりません")
+                    config.force_numpy = True
+
                 config.max_vram_ratio_limit = st.slider(
                     "Max VRAM ratio",
                     min_value=0.1,
@@ -790,9 +813,9 @@ def create_results_tab():
                 st.error(f"グラフ描画エラー: {e}")
         else:
             st.info("コンデンサのインピーダンスを計算してください")
-        
+
         st.divider()
-        
+
         # グラフ2: Top-kのZ_pdn特性
         st.subheader("PDNインピーダンス特性 |Z_pdn| (Top-k)")
         if st.session_state.top_k_results and st.session_state.frequency_grid is not None:
@@ -803,7 +826,7 @@ def create_results_tab():
                 st.error(f"グラフ描画エラー: {e}")
         else:
             st.info("探索を実行してください")
-        
+
         # Top-k結果テーブル
         if st.session_state.top_k_results:
             st.subheader("Top-k 結果")
@@ -822,54 +845,72 @@ def create_results_tab():
                     },
                     disabled=['Rank', 'Combination', 'Total Score', 'Types', 'Parts', 'MC Worst']
                 )
+
+                # 編集があった場合、show_flagsを更新
                 if len(edited_df) == len(st.session_state.top_k_results):
-                    st.session_state.top_k_show_flags = [
+                    new_flags = [
                         False if pd.isna(val) else bool(val)
                         for val in edited_df['show'].tolist()
                     ]
+                    # 変更があった場合のみ更新
+                    if new_flags != st.session_state.top_k_show_flags:
+                        st.session_state.top_k_show_flags = new_flags
             except Exception as e:
                 st.error(f"テーブル作成エラー: {e}")
 
 
 def create_zc_chart() -> alt.Chart:
     """コンデンサZ_c特性のグラフ作成"""
+    from deca_auto.utils import create_decimated_indices
+
     config = st.session_state.config
-    
+
     # データ準備
     data_list = []
-    for name, z_c in st.session_state.capacitor_impedances.items():
-        z_c_np = ensure_numpy(z_c)
-        f_grid = st.session_state.frequency_grid
-        if f_grid is not None:
-            f_grid_np = ensure_numpy(f_grid)
-            
-            # データフレーム用にデータを整形（間引き）
-            step = max(1, len(f_grid_np)//MAX_POINTS)
-            for i in range(0, len(f_grid_np), step):
-                if i < len(f_grid_np):
-                    data_list.append({
-                        'Frequency': float(f_grid_np[i]),
-                        'Impedance': float(np.abs(z_c_np[i])),
-                        'Capacitor': str(name)
-                    })
-    
+    f_grid = st.session_state.frequency_grid
+    f_min = None
+    f_max = None
+
+    if f_grid is not None:
+        f_grid_np = ensure_numpy(f_grid)
+        f_min = float(f_grid_np[0])
+        f_max = float(f_grid_np[-1])
+
+        # 間引きインデックスを作成
+        indices = create_decimated_indices(len(f_grid_np), MAX_POINTS)
+
+        for name, z_c in st.session_state.capacitor_impedances.items():
+            z_c_np = ensure_numpy(z_c)
+
+            # 間引いたデータを追加
+            for i in indices:
+                data_list.append({
+                    'Frequency': float(f_grid_np[i]),
+                    'Impedance': float(np.abs(z_c_np[i])),
+                    'Capacitor': str(name)
+                })
+
     # データが空の場合の処理
     if len(data_list) == 0:
-        # 空のチャートを返す
         return alt.Chart(pd.DataFrame()).mark_line()
-    
+
     df = pd.DataFrame(data_list)
-    
+
+    # X軸のスケール設定（domainで範囲を固定）
+    x_scale = alt.Scale(type='log', base=10)
+    if f_min is not None and f_max is not None:
+        x_scale = alt.Scale(type='log', base=10, domain=[f_min, f_max])
+
     # Altairチャート作成
     chart = alt.Chart(df).mark_line().encode(
-        x=alt.X('Frequency:Q', 
-                scale=alt.Scale(type='log', base=10),
-                axis=alt.Axis(title='Frequency [Hz]', grid=True)),
+        x=alt.X('Frequency:Q',
+                scale=x_scale,
+                axis=alt.Axis(title='Frequency [Hz]', grid=True, format='.1e')),
         y=alt.Y('Impedance:Q',
                 scale=alt.Scale(type='log', base=10),
                 axis=alt.Axis(title='|Z_c| [Ω]', grid=True)),
         color=alt.Color('Capacitor:N', legend=alt.Legend(title='Capacitor')),
-        tooltip=['Capacitor:N', 
+        tooltip=['Capacitor:N',
                 alt.Tooltip('Frequency:Q', format='.3e'),
                 alt.Tooltip('Impedance:Q', format='.3e')]
     ).properties(
@@ -879,12 +920,14 @@ def create_zc_chart() -> alt.Chart:
     ).configure_axis(
         gridOpacity=0.5
     )
-    
+
     return chart
 
 
 def create_zpdn_chart() -> alt.Chart:
     """PDN Z_pdn特性のグラフ作成"""
+    from deca_auto.utils import create_decimated_indices
+
     config = st.session_state.config
 
     f_grid = st.session_state.frequency_grid
@@ -896,7 +939,12 @@ def create_zpdn_chart() -> alt.Chart:
         return alt.Chart(pd.DataFrame()).mark_line()
 
     f_grid_np = ensure_numpy(f_grid)
-    max_step = max(1, len(f_grid_np) // MAX_POINTS)
+    f_min = float(f_grid_np[0])
+    f_max = float(f_grid_np[-1])
+
+    # 間引きインデックスを作成
+    indices = create_decimated_indices(len(f_grid_np), MAX_POINTS)
+    indices_target = create_decimated_indices(len(f_grid_np), 100)
 
     data_list = []
     running = st.session_state.optimization_running
@@ -912,7 +960,7 @@ def create_zpdn_chart() -> alt.Chart:
         z_pdn_np = ensure_numpy(z_pdn)
         if len(z_pdn_np) == 0:
             continue
-        for j in range(0, len(f_grid_np), max_step):
+        for j in indices:
             if j < len(z_pdn_np):
                 data_list.append({
                     'Frequency': float(f_grid_np[j]),
@@ -924,14 +972,13 @@ def create_zpdn_chart() -> alt.Chart:
 
     if target_mask is not None:
         target_np = ensure_numpy(target_mask)
-        step_target = max(1, len(f_grid_np) // 100)
         f_lo, f_hi = None, None
         if config.z_custom_mask:
             freqs = [pt[0] for pt in config.z_custom_mask if pt and len(pt) >= 2]
             if freqs:
                 f_lo, f_hi = min(freqs), max(freqs)
 
-        for j in range(0, len(f_grid_np), step_target):
+        for j in indices_target:
             if j < len(target_np):
                 fval = float(f_grid_np[j])
                 if (f_lo is not None and fval < f_lo) or (f_hi is not None and fval > f_hi):
@@ -947,7 +994,7 @@ def create_zpdn_chart() -> alt.Chart:
     if z_without is not None:
         z_base_np = ensure_numpy(z_without)
         if len(z_base_np) == len(f_grid_np):
-            for j in range(0, len(f_grid_np), max_step):
+            for j in indices:
                 data_list.append({
                     'Frequency': float(f_grid_np[j]),
                     'Impedance': float(np.abs(z_base_np[j])),
@@ -961,14 +1008,43 @@ def create_zpdn_chart() -> alt.Chart:
 
     df = pd.DataFrame(data_list)
 
-    color_domain = [f"Top-{i+1}" for i in range(10)] + ['Without Decap', 'Target Mask']
-    color_range = ZPDN_PALETTE + [WITHOUT_DECAP_COLOR, TARGET_MASK_COLOR]
+    # 実際にデータに含まれるTypeを抽出
+    actual_types = df['Type'].unique().tolist()
+
+    # Top-kの候補とその他の固定項目を分離
+    top_k_types = [t for t in actual_types if t.startswith('Top-')]
+    other_types = [t for t in actual_types if not t.startswith('Top-')]
+
+    # Top-kをソート（Top-1, Top-2, ...の順）
+    top_k_types.sort(key=lambda x: int(x.split('-')[1]))
+
+    # color_domainとcolor_rangeを構築
+    color_domain = []
+    color_range = []
+
+    # Top-k候補を追加
+    for i, t in enumerate(top_k_types):
+        color_domain.append(t)
+        # ZPDN_PALETTEから対応する色を取得（Top-1はindex 0、Top-2はindex 1...）
+        top_index = int(t.split('-')[1]) - 1
+        color_range.append(ZPDN_PALETTE[top_index % len(ZPDN_PALETTE)])
+
+    # その他の項目を追加
+    if 'Without Decap' in other_types:
+        color_domain.append('Without Decap')
+        color_range.append(WITHOUT_DECAP_COLOR)
+    if 'Target Mask' in other_types:
+        color_domain.append('Target Mask')
+        color_range.append(TARGET_MASK_COLOR)
+
+    # X軸のスケール設定（domainで範囲を固定）
+    x_scale = alt.Scale(type='log', base=10, domain=[f_min, f_max])
 
     chart = alt.Chart(df).mark_line(clip=True).encode(
         x=alt.X(
             'Frequency:Q',
-            scale=alt.Scale(type='log', base=10),
-            axis=alt.Axis(title='Frequency [Hz]', grid=True)
+            scale=x_scale,
+            axis=alt.Axis(title='Frequency [Hz]', grid=True, format='.1e')
         ),
         y=alt.Y(
             'Impedance:Q',
