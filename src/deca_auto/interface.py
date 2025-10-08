@@ -255,18 +255,18 @@ def create_sidebar():
                     temp_path = Path(f"temp_{uploaded_file.name}")
                     with open(temp_path, 'wb') as f:
                         f.write(uploaded_file.read())
-                    
+
                     # 設定読み込み
-                    new_config = load_config(temp_path)
+                    new_config = load_config(temp_path, verbose=False)
                     st.session_state.config = new_config
                     st.success("設定ファイルを読み込みました")
                     
                     # 一時ファイル削除
                     temp_path.unlink()
-                    
+
                     # アップロードファイル名を記録
                     st.session_state.last_uploaded_file = current_file_name
-                    
+
                     # ファイルアップローダーをリセット
                     st.session_state.file_upload_key += 1
                     st.rerun()
@@ -588,26 +588,24 @@ def create_settings_tab():
     # コンデンサリスト
     st.subheader(get_localized_text('capacitor_list', config))
 
-    # データフレーム作成
+    # データフレーム作成（コンデンサリストをテーブル表示用に変換）
     cap_data = []
     for cap in config.capacitors:
-        path = cap.get('path', "")
-        # path が None または空文字列なら初期値を使う
-        if path is None or path == "":
-            c = cap.get('C', 0.0)
-            esr = cap.get('ESR', 15e-3)
-            esl = cap.get('ESL', 0.5e-9)
-        else:
-            # path が定義されているなら、もし cap に ESR/ESL の値があればそれを使い、なければ None（空表示）にする
-            c = cap.get('C', 0)
-            esr = cap.get('ESR', 0)
-            esl = cap.get('ESL', 0)
+        # pathの取得（空の場合はRLCモード）
+        path = cap.get('path', "") or ""
+        has_path = bool(path)
+
+        # RLCモードの場合はデフォルト値、SPICEモードの場合は設定値（なければ0）
+        c_val = cap.get('C', 0.0 if not has_path else 0.0)
+        esr_val = cap.get('ESR', 15e-3 if not has_path else 0.0)
+        esl_val = cap.get('ESL', 0.5e-9 if not has_path else 0.0)
+
         cap_data.append({
             'Name': cap.get('name', ''),
-            'Path': path or '',
-            'C [F]': format_value(c),
-            'ESR [Ω]': format_value(esr),
-            'ESL [H]': format_value(esl),
+            'Path': path,
+            'C [F]': format_value(c_val),
+            'ESR [Ω]': format_value(esr_val),
+            'ESL [H]': format_value(esl_val),
             'L_mnt [H]': format_value(cap.get('L_mnt', config.L_mntN)),
             'usage_range': format_usage_range(cap.get('MIN'), cap.get('MAX'))
         })
@@ -629,33 +627,60 @@ def create_settings_tab():
     if st.button(get_localized_text("update_caplist", config)):
         new_caps = []
         for _, row in edited_df.iterrows():
-            path_val = row['Path'] if row['Path'] else None
-            # path_val が None の場合のみ ESR／ESL にデフォルト値
-            if path_val is None:
+            # name が空の場合はスキップ
+            name_val = str(row['Name']).strip() if row['Name'] else ""
+            if not name_val:
+                continue
+
+            # path の処理（空文字列を許容、None は空文字列に変換）
+            path_val = str(row['Path']).strip() if row['Path'] else ""
+
+            # path が空の場合はRLCモードとしてデフォルト値を使用
+            has_path = bool(path_val)
+
+            if not has_path:
+                # RLCモード: デフォルト値を使用
+                c_val = parse_value(row['C [F]'], 0.0)
                 esr_val = parse_value(row['ESR [Ω]'], 15e-3)
                 esl_val = parse_value(row['ESL [H]'], 0.5e-9)
             else:
-                # path があれば、空入力なら None に、入力あればその値にする
-                esr_val = parse_value(row['ESR [Ω]'], 0)
-                esl_val = parse_value(row['ESL [H]'], 0)
+                # SPICEモード: 値が指定されていればそれを使用、なければ0
+                c_val = parse_value(row['C [F]'], 0.0)
+                esr_val = parse_value(row['ESR [Ω]'], 0.0)
+                esl_val = parse_value(row['ESL [H]'], 0.0)
+
+            # L_mnt の処理
+            l_mnt_val = parse_value(row['L_mnt [H]'], config.L_mntN)
+
+            # 使用範囲の処理
             try:
                 min_count, max_count = parse_usage_range_input(row.get('usage_range', ''), config.max_total_parts)
             except ValueError as exc:
                 st.error(str(exc))
                 return
-            cap = {
-                'name': row['Name'],
-                'path': path_val,
-                'C': parse_value(row['C [F]'], 0),
-                'ESR': esr_val,
-                'ESL': esl_val,
-                'L_mnt': parse_value(row['L_mnt [H]'], config.L_mntN)
-            }
+
+            # コンデンサ辞書を構築（None を含めない）
+            cap = {'name': name_val}
+
+            if path_val:
+                cap['path'] = path_val
+
+            if c_val is not None and c_val != 0.0:
+                cap['C'] = c_val
+            if esr_val is not None and esr_val != 0.0:
+                cap['ESR'] = esr_val
+            if esl_val is not None and esl_val != 0.0:
+                cap['ESL'] = esl_val
+            if l_mnt_val is not None:
+                cap['L_mnt'] = l_mnt_val
+
             if min_count is not None:
                 cap['MIN'] = int(min_count)
             if max_count is not None:
                 cap['MAX'] = int(max_count)
+
             new_caps.append(cap)
+
         config.capacitors = new_caps
         st.success(get_localized_text("update_caplist", config))
 

@@ -137,6 +137,74 @@ class UserConfig:
 USER_CONFIG = UserConfig()
 
 
+def _load_config_field(config: UserConfig, key: str, value: Any) -> None:
+    """
+    設定フィールドを読み込む（特殊処理を含む）
+
+    Args:
+        config: 設定オブジェクト
+        key: フィールド名
+        value: 値
+    """
+    # 特殊処理が必要なフィールド
+    if key == "capacitors" and value is not None:
+        cap_list = []
+        for cap_data in value:
+            cap_dict = {}
+            for k, v in cap_data.items():
+                v_unwrapped = unwrap_toml_value(v)
+
+                # 数値フィールド（C, ESR, ESL, L_mnt）
+                if k in ["C", "ESR", "ESL", "L_mnt"]:
+                    if isinstance(v_unwrapped, str):
+                        cap_dict[k] = parse_scientific_notation(v_unwrapped)
+                    elif v_unwrapped is not None:
+                        cap_dict[k] = to_float(v_unwrapped, 0.0)
+
+                # 整数フィールド（MIN, MAX）
+                elif k in ["MIN", "MAX"]:
+                    if v_unwrapped is not None:
+                        cap_dict[k] = to_int(v_unwrapped, None)
+
+                # path フィールド
+                elif k == "path":
+                    cap_dict[k] = v_unwrapped if v_unwrapped is not None else ""
+
+                # name フィールド
+                elif k == "name":
+                    cap_dict[k] = v_unwrapped if v_unwrapped is not None else ""
+
+                # その他のフィールド
+                else:
+                    if v_unwrapped is not None:
+                        cap_dict[k] = v_unwrapped
+
+            # name が存在する場合のみ追加
+            if cap_dict.get("name"):
+                cap_list.append(cap_dict)
+        setattr(config, key, cap_list)
+
+    elif key == "z_custom_mask" and value is not None:
+        mask_list = []
+        for point in value:
+            if len(point) == 2:
+                f_raw, z_raw = point
+                f_val = parse_scientific_notation(f_raw) if isinstance(f_raw, str) else to_float(f_raw, None)
+                z_val = parse_scientific_notation(z_raw) if isinstance(z_raw, str) else to_float(z_raw, None)
+                if f_val is not None and z_val is not None:
+                    mask_list.append((f_val, z_val))
+        setattr(config, key, mask_list if mask_list else None)
+
+    elif isinstance(value, str) and key.startswith(("f_", "R_", "L_", "C_", "z_", "tol_", "tan_", "dc_", "mlcc_", "max_vram_", "min_total_", "weight_")):
+        try:
+            parsed_value = parse_scientific_notation(value)
+            setattr(config, key, parsed_value)
+        except Exception:
+            print(f"警告: パラメータ {key} の解析に失敗: {value}")
+    else:
+        setattr(config, key, value)
+
+
 def parse_scientific_notation(value: Any) -> float:
     """科学的記数法を解析（10e3, 1.6e-19形式に対応）"""
     if value is None:
@@ -169,72 +237,64 @@ def parse_scientific_notation(value: Any) -> float:
         raise ValueError(f"無効な数値形式: {value_str}")
 
 
-def load_config(config_path: Optional[Union[str, Path]] = None) -> UserConfig:
+def load_config(config_path: Optional[Union[str, Path]] = None, verbose: bool = True) -> UserConfig:
     """
     TOMLファイルから設定を読み込む
-    
+
     Args:
         config_path: 設定ファイルパス（Noneの場合はデフォルト設定を使用）
-    
+        verbose: デバッグログの出力フラグ
+
     Returns:
         UserConfig: 読み込んだ設定
     """
     config = UserConfig()
-    
+
     if config_path is None:
         return config
-    
+
     config_path = Path(config_path)
     if not config_path.exists():
         print(f"設定ファイルが見つかりません: {config_path}")
         return config
-    
+
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             toml_data = tomlkit.load(f)
-        
-        # TOMLデータで設定を上書き
-        for key, raw_value in toml_data.items():
+
+        # デバッグ: 読み込んだTOMLデータの構造を確認
+        if verbose:
+            print(f"=== TOMLデータ読み込み開始: {config_path} ===")
+            print(f"トップレベルキー: {list(toml_data.keys())}")
+
+        # TOMLデータで設定を上書き（セクション構造に対応）
+        for section_or_key, raw_value in toml_data.items():
             value = unwrap_toml_value(raw_value)
-            if hasattr(config, key):
-                # 特殊処理が必要なフィールド
-                if key == "capacitors" and value is not None:
-                    cap_list = []
-                    for cap_data in value:
-                        cap_dict = {}
-                        for k, v in cap_data.items():
-                            v_unwrapped = unwrap_toml_value(v)
-                            if k in ["C", "ESR", "ESL", "L_mnt"]:
-                                if isinstance(v_unwrapped, str):
-                                    cap_dict[k] = parse_scientific_notation(v_unwrapped)
-                                elif v_unwrapped is not None:
-                                    cap_dict[k] = to_float(v_unwrapped, None)
-                            elif k in ["MIN", "MAX"]:
-                                cap_dict[k] = to_int(v_unwrapped, None)
-                            else:
-                                cap_dict[k] = v_unwrapped
-                        cap_list.append(cap_dict)
-                    setattr(config, key, cap_list)
-                elif key == "z_custom_mask" and value is not None:
-                    mask_list = []
-                    for point in value:
-                        if len(point) == 2:
-                            f_raw, z_raw = point
-                            f_val = parse_scientific_notation(f_raw) if isinstance(f_raw, str) else to_float(f_raw, None)
-                            z_val = parse_scientific_notation(z_raw) if isinstance(z_raw, str) else to_float(z_raw, None)
-                            if f_val is not None and z_val is not None:
-                                mask_list.append((f_val, z_val))
-                    setattr(config, key, mask_list if mask_list else None)
-                elif isinstance(value, str) and key.startswith(("f_", "R_", "L_", "C_", "z_", "tol_", "tan_", "dc_", "mlcc_", "max_vram_", "min_total_", "weight_")):
-                    try:
-                        parsed_value = parse_scientific_notation(value)
-                        setattr(config, key, parsed_value)
-                    except Exception:
-                        print(f"警告: パラメータ {key} の解析に失敗: {value}")
-                else:
-                    setattr(config, key, value)
-        
-        print(f"設定ファイルを読み込みました: {config_path}")
+
+            # セクション（辞書）の場合は中身を展開
+            if isinstance(value, dict):
+                if verbose:
+                    print(f"[{section_or_key}] セクションを処理中...")
+                for key, sub_raw_value in value.items():
+                    sub_value = unwrap_toml_value(sub_raw_value)
+                    if hasattr(config, key):
+                        _load_config_field(config, key, sub_value)
+                        if verbose:
+                            print(f"  {key} = {sub_value}")
+                    else:
+                        if verbose:
+                            print(f"  警告: 未知のパラメータ '{key}' をスキップ")
+            # トップレベルのキーの場合（セクションではない）
+            elif hasattr(config, section_or_key):
+                _load_config_field(config, section_or_key, value)
+                if verbose:
+                    print(f"{section_or_key} = {value}")
+            else:
+                if verbose:
+                    print(f"警告: 未知のセクションまたはパラメータ '{section_or_key}' をスキップ")
+
+        if verbose:
+            print(f"=== 設定ファイルを読み込みました: {config_path} ===")
         
     except Exception as e:
         print(f"設定ファイルの読み込みエラー: {e}")
@@ -246,31 +306,51 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> UserConfig:
 def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
     """
     設定をTOMLファイルに保存
-    
+
     Args:
         config: 保存する設定
         config_path: 保存先パス
-    
+
     Returns:
         bool: 保存成功フラグ
     """
     try:
         config_path = Path(config_path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # データクラスを辞書に変換
         config_dict = asdict(config)
-        
+
         # 特殊な型の処理
         for key, value in config_dict.items():
             if isinstance(value, (np.integer, np.floating)):
                 config_dict[key] = float(value)
             elif isinstance(value, np.ndarray):
                 config_dict[key] = value.tolist()
-        
+
+        # capacitors の None/空文字列をフィルタリング
+        if "capacitors" in config_dict and config_dict["capacitors"] is not None:
+            filtered_capacitors = []
+            for cap in config_dict["capacitors"]:
+                if not isinstance(cap, dict):
+                    continue
+                filtered_cap = {}
+                for k, v in cap.items():
+                    # None をスキップ
+                    if v is None:
+                        continue
+                    # 空文字列をスキップ（name は除外）
+                    if k != "name" and isinstance(v, str) and v.strip() == "":
+                        continue
+                    filtered_cap[k] = v
+                # name が必須
+                if "name" in filtered_cap and filtered_cap["name"]:
+                    filtered_capacitors.append(filtered_cap)
+            config_dict["capacitors"] = filtered_capacitors
+
         # TOMLドキュメント作成
         doc = tomlkit.document()
-        
+
         # セクション分けして保存
         sections = {
             "frequency": ["f_start", "f_stop", "num_points_per_decade", "f_L", "f_H"],
@@ -296,7 +376,7 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
             "gui": ["use_gui", "server_port", "dark_theme", "language"],
             "output": ["excel_path", "excel_name"]
         }
-        
+
         # セクションごとに追加
         for section_name, keys in sections.items():
             section = tomlkit.table()
@@ -305,17 +385,18 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
                     section[key] = config_dict[key]
             if section:
                 doc[section_name] = section
-        
+
         # コンデンサリストを追加
-        doc["capacitors"] = config_dict["capacitors"]
-        
+        if "capacitors" in config_dict and config_dict["capacitors"]:
+            doc["capacitors"] = config_dict["capacitors"]
+
         # ファイルに書き込み
         with open(config_path, "w", encoding="utf-8") as f:
             tomlkit.dump(doc, f)
-        
+
         print(f"設定を保存しました: {config_path}")
         return True
-        
+
     except Exception as e:
         print(f"設定ファイルの保存エラー: {e}")
         traceback.print_exc()

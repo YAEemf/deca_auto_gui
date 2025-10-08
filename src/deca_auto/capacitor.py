@@ -13,7 +13,7 @@ import numpy as np
 from deca_auto.config import UserConfig
 from deca_auto.utils import (
     logger, Timer, get_progress_bar, transfer_to_device,
-    log_interpolate, validate_result, ensure_numpy
+    log_interpolate, validate_result, ensure_numpy, to_float
 )
 
 # 条件付きインポート
@@ -237,19 +237,6 @@ def apply_vector_fitting(z_samples: np.ndarray, f_grid: np.ndarray,
         return None
 
 
-def _get_cap_scalar(cap_config: Dict, key: str, default: float) -> float:
-    value = cap_config.get(key)
-    if value is None:
-        return float(default)
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        try:
-            return float(str(value))
-        except (TypeError, ValueError):
-            return float(default)
-
-
 def calculate_rlc_impedance(cap_config: Dict, f_grid: np.ndarray,
                            xp: Any = np, L_mntN: float = 0.5e-9) -> np.ndarray:
     """
@@ -265,19 +252,12 @@ def calculate_rlc_impedance(cap_config: Dict, f_grid: np.ndarray,
         複素インピーダンス
     """
     # パラメータ取得（デフォルト値使用）
-    C = _get_cap_scalar(cap_config, 'C', 1e-6)
-    ESR = _get_cap_scalar(cap_config, 'ESR', 15e-3)
-    ESL = _get_cap_scalar(cap_config, 'ESL', 0.5e-9)
+    C = to_float(cap_config.get('C'), 1e-6)
+    ESR = to_float(cap_config.get('ESR'), 15e-3)
+    ESL = to_float(cap_config.get('ESL'), 0.5e-9)
     
     # L_mntの処理：Noneの場合はデフォルト値を使用
-    L_mnt = cap_config.get('L_mnt')
-    if L_mnt is None:
-        L_mnt = float(L_mntN)
-    else:
-        try:
-            L_mnt = float(L_mnt)
-        except (TypeError, ValueError):
-            L_mnt = float(L_mntN)
+    L_mnt = to_float(cap_config.get('L_mnt'), L_mntN)
     
     # 角周波数
     f_backend = xp.asarray(f_grid)
@@ -297,26 +277,49 @@ def calculate_rlc_impedance(cap_config: Dict, f_grid: np.ndarray,
 
 def estimate_rlc_by_least_squares(z_c: np.ndarray, f_grid: np.ndarray) -> Tuple[float, float, float]:
     """
-    直列RLCのESR, L, Cを最小二乗で推定
+    直列RLCのESR, L, Cを最小二乗法で推定
+
+    インピーダンスZ(ω) = ESR + jωL - j/(ωC)の形式で
+    実部と虚部を分離して推定
+
+    Args:
+        z_c: 複素インピーダンス配列
+        f_grid: 周波数グリッド [Hz]
+
+    Returns:
+        (ESR, L, C): 推定されたESR [Ω], インダクタンス [H], 容量 [F]
     """
     z = ensure_numpy(z_c)
     f = ensure_numpy(f_grid)
-    w = 2*np.pi*f
+    w = 2 * np.pi * f
 
-    # 実部→ESR（定数項の中央値 または最小二乗の定数項）
+    # ESR推定: 実部の中央値
     esr = float(np.median(np.real(z)))
 
-    # 虚部 ≈ L*ω + (1/C)*(-1/ω) を最小二乗
-    y = np.imag(z) - np.median(np.imag(z[(len(z)//10):(len(z)//2)]))*0.0  # バイアス不要
-    X = np.vstack([w, -1.0/np.maximum(w, 1e-300)]).T
+    # LとCの推定: 虚部 Im(Z) = ωL - 1/(ωC) を最小二乗法で解く
+    # y = [ω, -1/ω] @ [L, 1/C]^T の形式
+    y = np.imag(z)
+    X = np.vstack([w, -1.0 / np.maximum(w, 1e-300)]).T
     theta, *_ = np.linalg.lstsq(X, y, rcond=None)
     L_est, invC_est = theta
-    C_est = float(1.0/np.maximum(invC_est, 1e-300))
+    C_est = float(1.0 / np.maximum(invC_est, 1e-300))
     L_est = float(L_est)
+
     return esr, L_est, C_est
 
-# 既存の estimate_capacitance_from_impedance の置換／呼び出し側差し替え
+
 def estimate_capacitance_from_impedance(z_c: np.ndarray, f_grid: np.ndarray, xp: Any = np) -> float:
+    """
+    インピーダンスから容量値を推定（estimate_rlc_by_least_squaresのラッパー）
+
+    Args:
+        z_c: 複素インピーダンス配列
+        f_grid: 周波数グリッド [Hz]
+        xp: バックエンドモジュール（未使用、後方互換性のため保持）
+
+    Returns:
+        推定容量 [F]
+    """
     _, _, C = estimate_rlc_by_least_squares(z_c, f_grid)
     return C
 
@@ -404,7 +407,7 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
         
         # 容量値確認
         if capacitance is None:
-            capacitance = _get_cap_scalar(cap_config, 'C', 1e-6)
+            capacitance = to_float(cap_config.get('C'), 1e-6)
     
     # GPU転送（必要な場合）
     z_c = transfer_to_device(z_c, xp)
