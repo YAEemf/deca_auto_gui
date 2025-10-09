@@ -71,7 +71,7 @@ def launch_streamlit(config_files: List[str] = None, no_search: bool = False):
             env["DECA_NO_SEARCH"] = "1"
         
         # Streamlit起動
-        logger.info(f"StreamlitのGUIを起動しています... (http://localhost:{port})")
+        # logger.info(f"StreamlitのGUIを起動しています (http://localhost:{port})")
         subprocess.run(cmd, env=env)
         
     except KeyboardInterrupt:

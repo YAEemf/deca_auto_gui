@@ -96,7 +96,7 @@ class UserConfig:
     # スコア重み
     weight_max: float = 0.2
     weight_area: float = 1.0
-    weight_mean: float = 0.3
+    weight_mean: float = 0.4
     weight_anti: float = 0.2
     weight_flat: float = 0.1
     weight_under: float = 0.1

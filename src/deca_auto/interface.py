@@ -203,17 +203,17 @@ def render_weights_section():
 
         col1, col2 = st.columns(2)
         with col1:
-            config.weight_max = st.slider("Max", 0.0, 1.0, config.weight_max, 0.05, key="sidebar_weights_slider_max")
-            config.weight_area = st.slider("Area", 0.0, 1.0, config.weight_area, 0.05, key="sidebar_weights_slider_area")
-            config.weight_anti = st.slider("Anti-resonance", 0.0, 1.0, config.weight_anti, 0.05, key="sidebar_weights_slider_anti")
-            config.weight_parts = st.slider("Parts", 0.0, 2.0, config.weight_parts, 0.05, key="sidebar_weights_slider_parts")
-            config.weight_flat = st.slider("Flatness", 0.0, 1.0, config.weight_flat, 0.05, key="sidebar_weights_slider_flat")
+            config.weight_max = st.slider("Max", 0.0, 1.0, config.weight_max, 0.1, key="sidebar_weights_slider_max")
+            config.weight_area = st.slider("Area", 0.0, 1.0, config.weight_area, 0.1, key="sidebar_weights_slider_area")
+            config.weight_anti = st.slider("Anti-resonance", 0.0, 1.0, config.weight_anti, 0.1, key="sidebar_weights_slider_anti")
+            config.weight_parts = st.slider("Parts", 0.0, 2.0, config.weight_parts, 0.1, key="sidebar_weights_slider_parts")
+            config.weight_flat = st.slider("Flatness", 0.0, 1.0, config.weight_flat, 0.1, key="sidebar_weights_slider_flat")
         with col2:
-            config.weight_mean = st.slider("Mean", 0.0, 1.0, config.weight_mean, 0.05, key="sidebar_weights_slider_mean")
-            config.weight_under = st.slider("Under", -1.0, 1.0, config.weight_under, 0.05, key="sidebar_weights_slider_under")
-            config.weight_resonance = st.slider('Resonance', 0.0, 1.0, config.weight_resonance, 0.05, key="sidebar_weights_slider_resonance")
-            config.weight_num_types = st.slider('Types', 0.0, 1.0, config.weight_num_types, 0.05, key="sidebar_weights_slider_num_types")
-            config.weight_mc_worst = st.slider("MC worst", 0.0, 1.0, config.weight_mc_worst, 0.05, key="sidebar_weights_slider_mc_worst")
+            config.weight_mean = st.slider("Mean", 0.0, 1.0, config.weight_mean, 0.1, key="sidebar_weights_slider_mean")
+            config.weight_under = st.slider("Under", -1.0, 1.0, config.weight_under, 0.1, key="sidebar_weights_slider_under")
+            config.weight_resonance = st.slider('Resonance', 0.0, 1.0, config.weight_resonance, 0.1, key="sidebar_weights_slider_resonance")
+            config.weight_num_types = st.slider('Types', 0.0, 2.0, config.weight_num_types, 0.1, key="sidebar_weights_slider_num_types")
+            config.weight_mc_worst = st.slider("MC worst", 0.0, 1.0, config.weight_mc_worst, 0.1, key="sidebar_weights_slider_mc_worst")
 
         config.ignore_safe_anti_resonance = st.checkbox(
             get_localized_text('ignore_safe_anti', config),
