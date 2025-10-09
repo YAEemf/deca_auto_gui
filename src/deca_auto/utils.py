@@ -445,17 +445,74 @@ def timed(func):
 # 対数補間
 def log_interpolate(x: np.ndarray, xp: np.ndarray, fp: np.ndarray, backend: Any = np) -> np.ndarray:
     """
-    対数スケール補間：常にNumPyで安全に実行し、必要ならbackendに戻す
+    対数スケール補間（GPU最適化版）
+
+    Args:
+        x: 補間する座標
+        xp: データ点の座標
+        fp: データ点の値
+        backend: バックエンドモジュール（np or cp）
+
+    Returns:
+        補間された値
+
+    Notes:
+        - GPU使用時はCPU転送を回避し、GPU上で直接補間
+        - CPU使用時は従来のNumPy補間を使用
     """
+    # GPU版の実装（CuPyが利用可能で、backendがCuPyの場合）
+    if CUPY_AVAILABLE and backend is cp:
+        try:
+            # GPU上で処理（転送なし）
+            x_gpu = backend.asarray(x).ravel()
+            xp_gpu = backend.asarray(xp).ravel()
+            fp_gpu = backend.asarray(fp).ravel()
+
+            # ソートと重複除去
+            sort_idx = backend.argsort(xp_gpu)
+            xp_gpu = xp_gpu[sort_idx]
+            fp_gpu = fp_gpu[sort_idx]
+
+            # 重複除去（GPU）
+            if len(xp_gpu) > 1:
+                diff = xp_gpu[1:] - xp_gpu[:-1]
+                uniq_mask = backend.concatenate([backend.array([True]), diff > 0])
+                xp_gpu = xp_gpu[uniq_mask]
+                fp_gpu = fp_gpu[uniq_mask]
+
+            # 対数変換
+            eps = 1e-300
+            mag = backend.maximum(backend.abs(fp_gpu), eps)
+            sign_src = backend.sign(fp_gpu)
+
+            log_x = backend.log10(backend.maximum(x_gpu, eps))
+            log_xp = backend.log10(backend.maximum(xp_gpu, eps))
+            log_mag = backend.log10(mag)
+
+            # GPU補間（線形補間を使用）
+            log_interp = backend.interp(log_x, log_xp, log_mag)
+
+            # 符号の補間
+            sign_lin = backend.interp(x_gpu, xp_gpu, sign_src, left=float(sign_src[0]), right=float(sign_src[-1]))
+            sign_lin = backend.where(sign_lin >= 0, 1.0, -1.0)
+
+            result = sign_lin * (10.0 ** log_interp)
+            return result
+
+        except Exception as e:
+            logger.warning(f"GPU補間でエラーが発生、CPUにフォールバック: {e}")
+            # フォールバック: CPU版を使用
+
+    # CPU版の実装（従来の実装）
     # まずCPU側に統一
-    x_np  = ensure_numpy(x)
+    x_np = ensure_numpy(x)
     xp_np = ensure_numpy(xp)
     fp_np = ensure_numpy(fp)
 
     # xpは単調増加・1次元に正規化
     xp_np = np.asarray(xp_np).ravel()
     fp_np = np.asarray(fp_np).ravel()
-    x_np  = np.asarray(x_np).ravel()
+    x_np = np.asarray(x_np).ravel()
 
     # xpの重複除去（np.interp要件対応）
     sort_idx = np.argsort(xp_np)
@@ -470,9 +527,9 @@ def log_interpolate(x: np.ndarray, xp: np.ndarray, fp: np.ndarray, backend: Any 
     mag = np.maximum(np.abs(fp_np), eps)
     sign_src = np.sign(fp_np)
 
-    log_x  = np.log10(np.maximum(x_np, eps))
+    log_x = np.log10(np.maximum(x_np, eps))
     log_xp = np.log10(np.maximum(xp_np, eps))
-    log_mag= np.log10(mag)
+    log_mag = np.log10(mag)
 
     # 安全にNumPy補間
     log_interp = np.interp(log_x, log_xp, log_mag)
@@ -493,18 +550,31 @@ def log_interpolate(x: np.ndarray, xp: np.ndarray, fp: np.ndarray, backend: Any 
 def decimate(data: np.ndarray, factor: int, axis: int = 0) -> np.ndarray:
     """
     データを間引く
-    
+
     Args:
         data: 入力データ
-        factor: 間引き係数
-        axis: 間引く軸
-    
+        factor: 間引き係数（2以上で有効、1以下は元データを返す）
+        axis: 間引く軸（デフォルト: 0）
+
     Returns:
         間引かれたデータ
+
+    Examples:
+        >>> data = np.arange(100)
+        >>> decimated = decimate(data, factor=10)
+        >>> len(decimated)
+        10
+        >>> decimated[0], decimated[1]
+        (0, 10)
+
+        >>> data_2d = np.arange(20).reshape(10, 2)
+        >>> decimated_2d = decimate(data_2d, factor=2, axis=0)
+        >>> decimated_2d.shape
+        (5, 2)
     """
     if factor <= 1:
         return data
-    
+
     # スライスで間引き
     slices = [slice(None)] * data.ndim
     slices[axis] = slice(None, None, factor)
@@ -733,6 +803,17 @@ def create_decimated_indices(data_length: int, max_points: int) -> list:
 
     Returns:
         間引き後のインデックスリスト
+
+    Examples:
+        >>> indices = create_decimated_indices(1000, 100)
+        >>> len(indices)
+        100
+        >>> indices[:3]
+        [0, 10, 20]
+
+    Notes:
+        - data_length <= max_points の場合は全インデックスを返す
+        - それ以外の場合は均等に間引いたインデックスを返す
     """
     if data_length <= max_points:
         return list(range(data_length))

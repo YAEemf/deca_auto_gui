@@ -371,17 +371,33 @@ def format_combination_name(count_vector: np.ndarray,
                           capacitor_names: List[str]) -> str:
     """
     組み合わせを文字列表現にフォーマット
-    
+
     Args:
-        count_vector: カウントベクトル
+        count_vector: カウントベクトル（各コンデンサの使用個数）
         capacitor_names: コンデンサ名リスト
-    
+
     Returns:
         フォーマット済み文字列
+
+    Examples:
+        >>> count_vec = np.array([2, 0, 3, 1])
+        >>> cap_names = ["C1_0.1uF", "C2_0.22uF", "C3_1uF", "C4_10uF"]
+        >>> format_combination_name(count_vec, cap_names)
+        '(C1_0.1uF)x2 + (C3_1uF)x3 + (C4_10uF) (Total: 6)'
+
+        >>> count_vec = np.array([1, 0, 0, 0])
+        >>> cap_names = ["C1_0.1uF", "C2_0.22uF", "C3_1uF", "C4_10uF"]
+        >>> format_combination_name(count_vec, cap_names)
+        '(C1_0.1uF) (Total: 1)'
+
+        >>> count_vec = np.array([0, 0, 0, 0])
+        >>> cap_names = ["C1_0.1uF", "C2_0.22uF", "C3_1uF", "C4_10uF"]
+        >>> format_combination_name(count_vec, cap_names)
+        'Empty'
     """
     parts = []
     total = 0
-    
+
     for i, name in enumerate(capacitor_names):
         count = int(count_vector[i])
         if count > 0:
@@ -390,7 +406,7 @@ def format_combination_name(count_vector: np.ndarray,
             else:
                 parts.append(f"({name})x{count}")
             total += count
-    
+
     if parts:
         combo_str = " + ".join(parts)
         return f"{combo_str} (Total: {total})"
