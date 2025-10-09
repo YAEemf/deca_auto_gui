@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import queue
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
@@ -21,11 +22,21 @@ from deca_auto.config import (
 )
 from deca_auto.utils import (
     logger, ensure_numpy, parse_scientific_notation,
-    get_custom_mask_freq_range
+    get_custom_mask_freq_range, set_log_level
 )
 from deca_auto.main import run_optimization
 from deca_auto.capacitor import calculate_all_capacitor_impedances
 from deca_auto.evaluator import format_combination_name
+
+# 環境変数からログレベルを取得して設定
+_log_level_str = os.environ.get('DECA_LOG_LEVEL')
+if _log_level_str:
+    try:
+        _log_level = int(_log_level_str)
+        set_log_level(_log_level)
+        logger.info(f"ログレベル: {logging.getLevelName(_log_level)}")
+    except (ValueError, TypeError):
+        pass
 
 MAX_POINTS = 1024
 

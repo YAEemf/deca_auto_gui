@@ -605,10 +605,10 @@ def run_optimization(config: UserConfig,
                     })
                 
                 # 進捗ログ
-                if (chunk_id + 1) % 10 == 0:
-                    best_score = global_top_k[0]['total_score'] if global_top_k else float('inf')
-                    logger.info(f"進捗: {(chunk_id + 1) / num_chunks * 100:.1f}%, "
-                               f"ベストスコア: {best_score:.6f}")
+                # if (chunk_id + 1) % 10 == 0:
+                #     best_score = global_top_k[0]['total_score'] if global_top_k else float('inf')
+                #     logger.info(f"進捗: {(chunk_id + 1) / num_chunks * 100:.1f}%, "
+                #                f"ベストスコア: {best_score:.6f}")
 
     except KeyboardInterrupt:
         logger.info("探索が中断されました")

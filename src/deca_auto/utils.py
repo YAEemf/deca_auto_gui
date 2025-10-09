@@ -44,7 +44,7 @@ def setup_logger(name: str = "deca_auto", level: int = logging.INFO) -> logging.
     logger.disabled = False
 
     formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        '[%(asctime)s %(levelname)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
