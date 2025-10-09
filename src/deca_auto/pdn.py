@@ -176,17 +176,36 @@ def _pdn_impedance_core(
     parasitic_elements: Dict[str, Any],
     xp: Any,
 ) -> Any:
-    """ラダー回路のPDNインピーダンスをバッチ計算"""
+    """
+    ラダー回路のPDNインピーダンスをバッチ計算
 
-    count_vectors = xp.asarray(count_vectors)
+    Args:
+        count_vectors: カウントベクトル (N_batch, N_caps)
+        z_cap_array: コンデンサインピーダンス配列
+        z_mnt_array: マウントインピーダンス配列
+        parasitic_elements: 寄生成分辞書
+        xp: バックエンドモジュール
+
+    Returns:
+        バッチPDNインピーダンス (N_batch, N_freq)
+    """
+    # 配列変換（すでにGPU上にある場合は転送しない）
+    if not isinstance(count_vectors, type(xp.array([]))):
+        count_vectors = xp.asarray(count_vectors)
     if count_vectors.ndim == 1:
         count_vectors = count_vectors[xp.newaxis, :]
 
     n_batch = count_vectors.shape[0]
-    z_cap_array = xp.asarray(z_cap_array)
-    z_mnt_array = xp.asarray(z_mnt_array)
 
+    # z_cap_arrayとz_mnt_arrayがすでに適切な形状の場合は変換スキップ
+    if not isinstance(z_cap_array, type(xp.array([]))):
+        z_cap_array = xp.asarray(z_cap_array)
+    if not isinstance(z_mnt_array, type(xp.array([]))):
+        z_mnt_array = xp.asarray(z_mnt_array)
+
+    # ブロードキャスト（必要な場合のみ）
     if z_cap_array.ndim == 2:
+        # broadcast_toは配列のコピーを作らないのでメモリ効率的
         z_cap_array = xp.broadcast_to(z_cap_array, (n_batch,) + z_cap_array.shape)
     if z_mnt_array.ndim == 2:
         z_mnt_array = xp.broadcast_to(z_mnt_array, (n_batch,) + z_mnt_array.shape)
@@ -194,11 +213,14 @@ def _pdn_impedance_core(
     if z_cap_array.shape[0] != n_batch or z_mnt_array.shape[0] != n_batch:
         raise ValueError("コンデンサ配列とカウントベクトルのバッチ数が一致していません")
 
+    # マウントインピーダンスを加算（インプレース演算で最適化）
     z_with_mount = z_cap_array + z_mnt_array
     n_caps = z_with_mount.shape[1]
 
+    # VRMアドミタンスの初期化（tileの代わりにブロードキャストを使用）
     y_vrm = parasitic_elements['y_vrm']
-    y_total = xp.tile(y_vrm, (n_batch, 1))
+    y_total = xp.empty((n_batch, len(y_vrm)), dtype=y_vrm.dtype)
+    y_total[:] = y_vrm  # ブロードキャスト代入
 
     for cap_idx in range(n_caps - 1, -1, -1):
         idx = xp.where(count_vectors[:, cap_idx] > 0)[0]

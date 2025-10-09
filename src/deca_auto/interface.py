@@ -17,9 +17,12 @@ import altair as alt
 # 絶対パスでインポート
 from deca_auto.config import (
     UserConfig, load_config, save_config, validate_config,
-    get_localized_text, parse_scientific_notation
+    get_localized_text
 )
-from deca_auto.utils import logger, ensure_numpy
+from deca_auto.utils import (
+    logger, ensure_numpy, parse_scientific_notation,
+    get_custom_mask_freq_range
+)
 from deca_auto.main import run_optimization
 from deca_auto.capacitor import calculate_all_capacitor_impedances
 from deca_auto.evaluator import format_combination_name
@@ -1020,9 +1023,7 @@ def create_zpdn_chart() -> alt.Chart:
         target_np = ensure_numpy(target_mask)
         f_lo, f_hi = None, None
         if config.z_custom_mask:
-            freqs = [pt[0] for pt in config.z_custom_mask if pt and len(pt) >= 2]
-            if freqs:
-                f_lo, f_hi = min(freqs), max(freqs)
+            f_lo, f_hi = get_custom_mask_freq_range(config.z_custom_mask)
 
         for j in indices_target:
             if j < len(target_np):

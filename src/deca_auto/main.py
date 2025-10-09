@@ -19,7 +19,7 @@ from deca_auto.utils import (
     logger, get_backend, get_gpu_info, get_vram_budget,
     generate_frequency_grid, create_evaluation_mask, create_target_mask,
     Timer, memory_cleanup, get_progress_bar, transfer_to_device,
-    get_dtype, ensure_numpy, to_float
+    get_dtype, ensure_numpy, to_float, get_custom_mask_freq_range
 )
 from deca_auto.capacitor import calculate_all_capacitor_impedances
 from deca_auto.pdn import calculate_pdn_impedance_batch, prepare_pdn_components
@@ -364,16 +364,15 @@ def run_optimization(config: UserConfig,
         logger.info(f"周波数点数: {len(f_grid)}")
     
     # 評価帯域マスク生成
-    eval_f_L = config.f_L
-    eval_f_H = config.f_H
-    
+    eval_f_L, eval_f_H = config.f_L, config.f_H
+
     # カスタムマスク使用時は評価帯域を更新
     if config.z_custom_mask:
-        custom_freqs = [f for f, _ in config.z_custom_mask]
-        eval_f_L = min(custom_freqs)
-        eval_f_H = max(custom_freqs)
-        logger.info(f"カスタムマスクによる評価帯域: {eval_f_L:.2e} - {eval_f_H:.2e} Hz")
-    
+        custom_f_L, custom_f_H = get_custom_mask_freq_range(config.z_custom_mask)
+        if custom_f_L is not None and custom_f_H is not None:
+            eval_f_L, eval_f_H = custom_f_L, custom_f_H
+            logger.info(f"カスタムマスクによる評価帯域: {eval_f_L:.2e} - {eval_f_H:.2e} Hz")
+
     eval_mask = create_evaluation_mask(f_grid, eval_f_L, eval_f_H, xp)
     logger.info(f"評価帯域内の周波数点数: {xp.sum(eval_mask)}")
     
@@ -397,24 +396,26 @@ def run_optimization(config: UserConfig,
     
     # 容量でソート（小→大）
     capacitor_names = list(cap_impedances.keys())
-    capacitances = []
+    capacitances = {}
+
     for name in capacitor_names:
         cap_config = next((c for c in config.capacitors if c['name'] == name), None)
         if cap_config and 'C' in cap_config and cap_config['C'] is not None:
-            capacitances.append(to_float(cap_config['C'], 1e-6))
+            capacitances[name] = to_float(cap_config['C'], 1e-6)
         else:
             # インピーダンスから容量推定（CPUで実行）
             z_c_np = ensure_numpy(cap_impedances[name])
             f_grid_np = ensure_numpy(f_grid)
             omega = 2 * np.pi * f_grid_np
+            # 虚部からの容量推定（効率化）
             omega_imag = omega * np.imag(z_c_np)
-            omega_imag = np.where(np.abs(omega_imag) < 1e-30, 1e-30, omega_imag)
-            c_estimated = -1.0 / omega_imag
-            capacitances.append(float(np.mean(c_estimated)))
-    
+            # 極小値を避けるためのクリッピング
+            omega_imag_safe = np.where(np.abs(omega_imag) < 1e-30, 1e-30, omega_imag)
+            c_estimated = -1.0 / omega_imag_safe
+            capacitances[name] = float(np.median(c_estimated))  # 平均の代わりに中央値を使用（外れ値に強い）
+
     # ソート
-    sorted_indices = np.argsort(capacitances)
-    sorted_cap_names = [capacitor_names[i] for i in sorted_indices]
+    sorted_cap_names = sorted(capacitor_names, key=lambda n: capacitances[n])
     sorted_cap_impedances = {name: cap_impedances[name] for name in sorted_cap_names}
     pdn_assets = prepare_pdn_components(sorted_cap_impedances, config, f_grid, xp, dtype_c)
     if pdn_assets.get('cap_names') != tuple(sorted_cap_names):

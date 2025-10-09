@@ -7,7 +7,7 @@ import time
 import traceback
 import logging
 import sys
-from typing import Optional, Union, Any, Tuple
+from typing import Optional, Union, Any, Tuple, List
 from contextlib import contextmanager
 from functools import wraps
 import numpy as np
@@ -820,3 +820,81 @@ def create_decimated_indices(data_length: int, max_points: int) -> list:
 
     step = max(1, data_length // max_points)
     return list(range(0, data_length, step))
+
+
+def parse_scientific_notation(value: Any) -> float:
+    """
+    科学的記数法を解析（10e3, 1.6e-19形式に対応）
+
+    Args:
+        value: 解析する値
+
+    Returns:
+        float: 解析された浮動小数点数
+
+    Raises:
+        ValueError: 無効な値または形式の場合
+
+    Examples:
+        >>> parse_scientific_notation("10e3")
+        10000.0
+        >>> parse_scientific_notation("1.5e-9")
+        1.5e-09
+        >>> parse_scientific_notation(100)
+        100.0
+    """
+    if value is None:
+        raise ValueError("値がNoneです")
+
+    # すでに数値の場合
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    # 文字列に変換
+    value_str = str(value).strip()
+    if not value_str:
+        raise ValueError("空の文字列です")
+
+    try:
+        # 通常の浮動小数点数として解析を試みる
+        return float(value_str)
+    except ValueError:
+        # 10e3形式の場合の処理
+        value_str = value_str.replace(" ", "")
+        if "e" in value_str.lower():
+            parts = value_str.lower().split("e")
+            if len(parts) == 2:
+                try:
+                    base = float(parts[0]) if parts[0] else 1.0
+                    exp = float(parts[1])
+                    return base * (10 ** exp)
+                except:
+                    pass
+        raise ValueError(f"無効な数値形式: {value_str}")
+
+
+def get_custom_mask_freq_range(z_custom_mask: Optional[List[Tuple[float, float]]]) -> Tuple[Optional[float], Optional[float]]:
+    """
+    カスタムマスクから周波数範囲を取得
+
+    Args:
+        z_custom_mask: カスタムマスク [(freq, impedance), ...]
+
+    Returns:
+        (f_min, f_max): 周波数の最小値と最大値のタプル（マスクがNoneの場合は (None, None)）
+
+    Examples:
+        >>> mask = [(1e3, 10e-3), (1e6, 8e-3), (1e8, 0.45)]
+        >>> get_custom_mask_freq_range(mask)
+        (1000.0, 100000000.0)
+        >>> get_custom_mask_freq_range(None)
+        (None, None)
+    """
+    if not z_custom_mask or len(z_custom_mask) == 0:
+        return None, None
+
+    freqs = [f for f, _ in z_custom_mask if f is not None]
+    if not freqs:
+        return None, None
+
+    return min(freqs), max(freqs)

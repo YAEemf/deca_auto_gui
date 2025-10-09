@@ -10,7 +10,7 @@ import traceback
 from dataclasses import dataclass, field, asdict
 import numpy as np
 
-from deca_auto.utils import unwrap_toml_value, to_float, to_int
+from deca_auto.utils import unwrap_toml_value, to_float, to_int, parse_scientific_notation
 
 
 @dataclass
@@ -203,38 +203,6 @@ def _load_config_field(config: UserConfig, key: str, value: Any) -> None:
             print(f"警告: パラメータ {key} の解析に失敗: {value}")
     else:
         setattr(config, key, value)
-
-
-def parse_scientific_notation(value: Any) -> float:
-    """科学的記数法を解析（10e3, 1.6e-19形式に対応）"""
-    if value is None:
-        raise ValueError("値がNoneです")
-    
-    # すでに数値の場合
-    if isinstance(value, (int, float)):
-        return float(value)
-    
-    # 文字列に変換
-    value_str = str(value).strip()
-    if not value_str:
-        raise ValueError("空の文字列です")
-    
-    try:
-        # 通常の浮動小数点数として解析を試みる
-        return float(value_str)
-    except ValueError:
-        # 10e3形式の場合の処理
-        value_str = value_str.replace(" ", "")
-        if "e" in value_str.lower():
-            parts = value_str.lower().split("e")
-            if len(parts) == 2:
-                try:
-                    base = float(parts[0]) if parts[0] else 1.0
-                    exp = float(parts[1])
-                    return base * (10 ** exp)
-                except:
-                    pass
-        raise ValueError(f"無効な数値形式: {value_str}")
 
 
 def load_config(config_path: Optional[Union[str, Path]] = None, verbose: bool = True) -> UserConfig:

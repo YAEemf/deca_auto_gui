@@ -12,7 +12,7 @@ import xlsxwriter
 
 # 絶対パスでインポート  
 from deca_auto.config import UserConfig
-from deca_auto.utils import logger, ensure_numpy, decimate
+from deca_auto.utils import logger, ensure_numpy, decimate, get_custom_mask_freq_range
 from deca_auto.evaluator import format_combination_name, calculate_score_components
 
 ZPDN_PALETTE = [
@@ -209,13 +209,11 @@ def write_detail_sheet(worksheet, results: Dict, config: UserConfig,
     target_mask = ensure_numpy(results.get('target_mask', []))
     
     # 評価帯域マスク再構築
+    eval_f_L, eval_f_H = config.f_L, config.f_H
     if config.z_custom_mask:
-        freqs = [f for f, _ in config.z_custom_mask]
-        eval_f_L = min(freqs)
-        eval_f_H = max(freqs)
-    else:
-        eval_f_L = config.f_L
-        eval_f_H = config.f_H
+        custom_f_L, custom_f_H = get_custom_mask_freq_range(config.z_custom_mask)
+        if custom_f_L is not None and custom_f_H is not None:
+            eval_f_L, eval_f_H = custom_f_L, custom_f_H
     
     eval_mask = (f_grid >= eval_f_L) & (f_grid <= eval_f_H)
     
@@ -333,13 +331,11 @@ def write_impedance_data(worksheet, results: Dict, config: UserConfig, header_fo
     target_mask = ensure_numpy(results.get('target_mask', []))
 
     # 評価帯域の計算（Target Mask表示制御用）
+    eval_f_L, eval_f_H = config.f_L, config.f_H
     if config.z_custom_mask:
-        freqs = [pt[0] for pt in config.z_custom_mask if pt and len(pt) >= 2]
-        eval_f_L = min(freqs) if freqs else config.f_L
-        eval_f_H = max(freqs) if freqs else config.f_H
-    else:
-        eval_f_L = config.f_L
-        eval_f_H = config.f_H
+        custom_f_L, custom_f_H = get_custom_mask_freq_range(config.z_custom_mask)
+        if custom_f_L is not None and custom_f_H is not None:
+            eval_f_L, eval_f_H = custom_f_L, custom_f_H
 
     # データを間引く（最大1000点）
     indices = create_decimated_indices(len(f_grid), 1000)
