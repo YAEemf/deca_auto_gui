@@ -1,4 +1,4 @@
-# GUI版 デカ・オート (Deca-Auto)
+# デカ・オート (Deca-Auto)
 
 **Deca-Auto: Automated Optimization of Decoupling Capacitor Combinations in PDN**
 
@@ -14,7 +14,7 @@
 - デカップリングコンデンサの組み合わせ自動探索
 - MurataやTDK提供の`SPICE`モデルを利用可能（.modファイル）
 - コンデンサの基本パラメータ（C / ESR / ESL）を自分で定義して利用可能
-- 想定PDN
+- 想定PDN（評価する組み合わせにおけるコンデンサは常にLoad側から容量が小さい順に並ぶ）
 
 ![""](PDN.jpg)
 
