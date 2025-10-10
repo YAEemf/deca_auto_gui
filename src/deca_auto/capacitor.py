@@ -275,6 +275,52 @@ def calculate_rlc_impedance(cap_config: Dict, f_grid: np.ndarray,
     return z_c
 
 
+def estimate_capacitance_from_resonance(z: np.ndarray, f: np.ndarray) -> float:
+    """
+    インピーダンスの低周波数領域から容量を推定（フォールバック用）
+
+    低周波数では容量性リアクタンスが支配的: Z ≈ -j/(ωC)
+    C = -1/(ω * Im(Z))
+
+    Args:
+        z: 複素インピーダンス配列
+        f: 周波数グリッド [Hz]
+
+    Returns:
+        推定容量 [F]
+    """
+    try:
+        # 低周波数領域（最初の20%）を使用
+        n_low = max(1, len(f) // 5)
+        f_low = f[:n_low]
+        z_low = z[:n_low]
+
+        # 角周波数
+        w_low = 2 * np.pi * f_low
+
+        # 容量性リアクタンスから容量を計算: C = -1/(ω * Im(Z))
+        # Im(Z)が負の領域（容量性）のみを使用
+        imag_z = np.imag(z_low)
+        mask = imag_z < 0  # 容量性領域
+
+        if np.sum(mask) > 0:
+            C_samples = -1.0 / (w_low[mask] * imag_z[mask])
+            # 異常値を除外（1pF～100mF）
+            valid_mask = (C_samples >= 1e-12) & (C_samples <= 0.1)
+            if np.sum(valid_mask) > 0:
+                C_est = float(np.median(C_samples[valid_mask]))
+                logger.debug(f"共振周波数法による容量推定: {C_est*1e6:.3f}μF")
+                return C_est
+
+        # フォールバック: デフォルト値
+        logger.warning("共振周波数からの容量推定に失敗。デフォルト値1μFを使用します。")
+        return 1e-6
+
+    except Exception as e:
+        logger.warning(f"共振周波数からの容量推定エラー: {e}。デフォルト値1μFを使用します。")
+        return 1e-6
+
+
 def estimate_rlc_by_least_squares(z_c: np.ndarray, f_grid: np.ndarray) -> Tuple[float, float, float]:
     """
     直列RLCのESR, L, Cを最小二乗法で推定
@@ -300,10 +346,34 @@ def estimate_rlc_by_least_squares(z_c: np.ndarray, f_grid: np.ndarray) -> Tuple[
     # y = [ω, -1/ω] @ [L, 1/C]^T の形式
     y = np.imag(z)
     X = np.vstack([w, -1.0 / np.maximum(w, 1e-300)]).T
-    theta, *_ = np.linalg.lstsq(X, y, rcond=None)
-    L_est, invC_est = theta
-    C_est = float(1.0 / np.maximum(invC_est, 1e-300))
-    L_est = float(L_est)
+
+    try:
+        theta, residuals, rank, s = np.linalg.lstsq(X, y, rcond=None)
+        L_est, invC_est = theta
+
+        # 容量推定の妥当性チェック
+        # invC_estが非常に小さい値または負の場合はフォールバック
+        if invC_est <= 1e-6:  # 1e-6未満の場合、容量が1MF以上になり異常
+            logger.warning(f"容量推定値が異常です (1/C = {invC_est:.3e})。共振周波数からの推定にフォールバックします。")
+            # 共振周波数からの推定を試みる
+            C_est = estimate_capacitance_from_resonance(z, f)
+        else:
+            C_est = float(1.0 / invC_est)
+            # 容量値の範囲チェック（1pF～100mF）
+            if not (1e-12 <= C_est <= 0.1):
+                logger.warning(f"推定容量が範囲外です (C = {C_est:.6e} F = {C_est*1e6:.3f}μF)。共振周波数からの推定にフォールバックします。")
+                C_est = estimate_capacitance_from_resonance(z, f)
+
+        L_est = float(L_est)
+        # インダクタンスの範囲チェック（0～100μH）
+        if L_est < 0 or L_est > 100e-6:
+            logger.warning(f"推定インダクタンスが範囲外です (L = {L_est:.6e} H)。デフォルト値を使用します。")
+            L_est = 0.5e-9  # デフォルト0.5nH
+
+    except Exception as e:
+        logger.warning(f"最小二乗法による推定に失敗しました: {e}。共振周波数からの推定にフォールバックします。")
+        C_est = estimate_capacitance_from_resonance(z, f)
+        L_est = 0.5e-9
 
     return esr, L_est, C_est
 
@@ -396,7 +466,10 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
                 # 容量推定（未定義の場合）
                 if capacitance is None:
                     capacitance = estimate_capacitance_from_impedance(z_c, f_grid, np)
-                    logger.debug(f"{name}: 推定容量 = {capacitance*1e6:.3f}μF")
+                    if capacitance >= 1e-6:
+                        logger.info(f"{name}: 推定容量 = {capacitance*1e6:.3f}μF")
+                    else:
+                        logger.info(f"{name}: 推定容量 = {capacitance*1e9:.3f}nF")
         else:
             logger.warning(f"SPICEモデルが見つかりません: {spice_path}")
     
