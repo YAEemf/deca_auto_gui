@@ -34,7 +34,6 @@ if _log_level_str:
     try:
         _log_level = int(_log_level_str)
         set_log_level(_log_level)
-        logger.info(f"ログレベル: {logging.getLevelName(_log_level)}")
     except (ValueError, TypeError):
         pass
 

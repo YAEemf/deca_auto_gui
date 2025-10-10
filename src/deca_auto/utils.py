@@ -331,60 +331,85 @@ def get_vram_budget(max_vram_ratio: float = 0.5, cuda_device: int = 0) -> Tuple[
 def ensure_numpy(array: Union[np.ndarray, Any]) -> np.ndarray:
     """
     配列をNumPy配列に変換（CuPy配列の場合はCPUに転送）
-    
+
     Args:
         array: 入力配列
-    
+
     Returns:
         np.ndarray: NumPy配列
+
+    Notes:
+        - すでにNumPy配列の場合はコピーを避ける
+        - CuPy配列の場合のみCPU転送を実行
     """
+    # すでにNumPy配列の場合はそのまま返す（コピー回避）
+    if isinstance(array, np.ndarray):
+        return array
+
+    # CuPy配列の場合
     if CUPY_AVAILABLE and hasattr(array, "__cuda_array_interface__"):
-        # CuPy配列の場合
         return cp.asnumpy(array)
+
+    # その他の配列様オブジェクト
     return np.asarray(array)
 
 
 def ensure_cupy(array: Union[np.ndarray, Any], dtype: Optional[np.dtype] = None) -> Any:
     """
     配列をCuPy配列に変換（利用可能な場合、そうでなければNumPy配列のまま）
-    
+
     Args:
         array: 入力配列
         dtype: データ型
-    
+
     Returns:
         CuPy配列またはNumPy配列
+
+    Notes:
+        - CuPy利用不可の場合はNumPy配列を返す
+        - すでに目的のデバイス・型の場合はコピーを避ける
     """
     if not CUPY_AVAILABLE:
         return np.asarray(array, dtype=dtype) if dtype else np.asarray(array)
-    
+
     try:
+        # すでにCuPy配列かつ型が一致する場合
         if hasattr(array, "__cuda_array_interface__"):
-            # すでにCuPy配列
-            return array if dtype is None else cp.asarray(array, dtype=dtype)
-        else:
-            # NumPy配列からCuPy配列へ
-            return cp.asarray(array, dtype=dtype) if dtype else cp.asarray(array)
+            if dtype is None or array.dtype == dtype:
+                return array
+            return cp.asarray(array, dtype=dtype)
+
+        # NumPy配列からCuPy配列へ転送
+        return cp.asarray(array, dtype=dtype) if dtype else cp.asarray(array)
+
     except Exception as e:
         logger.warning(f"CuPy変換エラー: {e}")
         return np.asarray(array, dtype=dtype) if dtype else np.asarray(array)
 
 
-def transfer_to_device(data: Any, xp: Any) -> Any:
+def transfer_to_device(data: Any, xp: Any, dtype: Optional[np.dtype] = None) -> Any:
     """
     データを適切なデバイスに転送
-    
+
     Args:
         data: 転送するデータ
         xp: バックエンドモジュール（np or cp）
-    
+        dtype: オプションのデータ型
+
     Returns:
         転送後のデータ
+
+    Notes:
+        - すでに目的のデバイスにある場合はコピーを避ける
+        - 型変換が必要な場合のみ実行
     """
     if xp is np:
-        return ensure_numpy(data)
+        result = ensure_numpy(data)
+        if dtype is not None and result.dtype != dtype:
+            return result.astype(dtype, copy=False)
+        return result
     else:
-        return ensure_cupy(data)
+        return ensure_cupy(data, dtype)
 
 
 # データ型ヘルパー
@@ -460,88 +485,72 @@ def log_interpolate(x: np.ndarray, xp: np.ndarray, fp: np.ndarray, backend: Any 
         - GPU使用時はCPU転送を回避し、GPU上で直接補間
         - CPU使用時は従来のNumPy補間を使用
     """
-    # GPU版の実装（CuPyが利用可能で、backendがCuPyの場合）
+    # 共通の前処理ヘルパー
+    def _prepare_data(x_arr, xp_arr, fp_arr, backend_mod):
+        """データの準備と重複除去"""
+        x_flat = backend_mod.asarray(x_arr).ravel()
+        xp_flat = backend_mod.asarray(xp_arr).ravel()
+        fp_flat = backend_mod.asarray(fp_arr).ravel()
+
+        # ソートと重複除去
+        sort_idx = backend_mod.argsort(xp_flat)
+        xp_sorted = xp_flat[sort_idx]
+        fp_sorted = fp_flat[sort_idx]
+
+        if len(xp_sorted) > 1:
+            diff = xp_sorted[1:] - xp_sorted[:-1]
+            uniq_mask = backend_mod.concatenate([backend_mod.array([True]), diff > 0])
+            xp_sorted = xp_sorted[uniq_mask]
+            fp_sorted = fp_sorted[uniq_mask]
+
+        return x_flat, xp_sorted, fp_sorted
+
+    # 共通の補間ロジック
+    def _interpolate_log(x_flat, xp_sorted, fp_sorted, backend_mod, eps=1e-300):
+        """対数補間の実行"""
+        # 絶対値と符号を分離
+        mag = backend_mod.maximum(backend_mod.abs(fp_sorted), eps)
+        sign_src = backend_mod.sign(fp_sorted)
+
+        # 対数変換
+        log_x = backend_mod.log10(backend_mod.maximum(x_flat, eps))
+        log_xp = backend_mod.log10(backend_mod.maximum(xp_sorted, eps))
+        log_mag = backend_mod.log10(mag)
+
+        # 補間実行
+        log_interp = backend_mod.interp(log_x, log_xp, log_mag)
+
+        # 符号の線形補間
+        sign_lin = backend_mod.interp(
+            x_flat, xp_sorted, sign_src,
+            left=float(sign_src[0]),
+            right=float(sign_src[-1])
+        )
+        sign_lin = backend_mod.where(sign_lin >= 0, 1.0, -1.0)
+
+        return sign_lin * (10.0 ** log_interp)
+
+    # GPU版
     if CUPY_AVAILABLE and backend is cp:
         try:
-            # GPU上で処理（転送なし）
-            x_gpu = backend.asarray(x).ravel()
-            xp_gpu = backend.asarray(xp).ravel()
-            fp_gpu = backend.asarray(fp).ravel()
-
-            # ソートと重複除去
-            sort_idx = backend.argsort(xp_gpu)
-            xp_gpu = xp_gpu[sort_idx]
-            fp_gpu = fp_gpu[sort_idx]
-
-            # 重複除去（GPU）
-            if len(xp_gpu) > 1:
-                diff = xp_gpu[1:] - xp_gpu[:-1]
-                uniq_mask = backend.concatenate([backend.array([True]), diff > 0])
-                xp_gpu = xp_gpu[uniq_mask]
-                fp_gpu = fp_gpu[uniq_mask]
-
-            # 対数変換
-            eps = 1e-300
-            mag = backend.maximum(backend.abs(fp_gpu), eps)
-            sign_src = backend.sign(fp_gpu)
-
-            log_x = backend.log10(backend.maximum(x_gpu, eps))
-            log_xp = backend.log10(backend.maximum(xp_gpu, eps))
-            log_mag = backend.log10(mag)
-
-            # GPU補間（線形補間を使用）
-            log_interp = backend.interp(log_x, log_xp, log_mag)
-
-            # 符号の補間
-            sign_lin = backend.interp(x_gpu, xp_gpu, sign_src, left=float(sign_src[0]), right=float(sign_src[-1]))
-            sign_lin = backend.where(sign_lin >= 0, 1.0, -1.0)
-
-            result = sign_lin * (10.0 ** log_interp)
+            x_gpu, xp_gpu, fp_gpu = _prepare_data(x, xp, fp, backend)
+            result = _interpolate_log(x_gpu, xp_gpu, fp_gpu, backend)
             return result
-
         except Exception as e:
             logger.warning(f"GPU補間でエラーが発生、CPUにフォールバック: {e}")
-            # フォールバック: CPU版を使用
+            # フォールバック
 
-    # CPU版の実装（従来の実装）
-    # まずCPU側に統一
-    x_np = ensure_numpy(x)
-    xp_np = ensure_numpy(xp)
-    fp_np = ensure_numpy(fp)
+    # CPU版（またはフォールバック）
+    x_cpu, xp_cpu, fp_cpu = _prepare_data(
+        ensure_numpy(x),
+        ensure_numpy(xp),
+        ensure_numpy(fp),
+        np
+    )
+    result = _interpolate_log(x_cpu, xp_cpu, fp_cpu, np)
 
-    # xpは単調増加・1次元に正規化
-    xp_np = np.asarray(xp_np).ravel()
-    fp_np = np.asarray(fp_np).ravel()
-    x_np = np.asarray(x_np).ravel()
-
-    # xpの重複除去（np.interp要件対応）
-    sort_idx = np.argsort(xp_np)
-    xp_np = xp_np[sort_idx]
-    fp_np = fp_np[sort_idx]
-    uniq_mask = np.concatenate([[True], xp_np[1:] > xp_np[:-1]])
-    xp_np = xp_np[uniq_mask]
-    fp_np = fp_np[uniq_mask]
-
-    # ゼロ・符号対策（対数補間は|fp|を使用し符号は別に保持）
-    eps = 1e-300
-    mag = np.maximum(np.abs(fp_np), eps)
-    sign_src = np.sign(fp_np)
-
-    log_x = np.log10(np.maximum(x_np, eps))
-    log_xp = np.log10(np.maximum(xp_np, eps))
-    log_mag = np.log10(mag)
-
-    # 安全にNumPy補間
-    log_interp = np.interp(log_x, log_xp, log_mag)
-
-    # 元の符号は周波数線形軸で補間（エッジで±1が暴れないよう外挿は端値保持）
-    sign_lin = np.interp(x_np, xp_np, sign_src, left=sign_src[0], right=sign_src[-1])
-    sign_lin = np.where(sign_lin >= 0, 1.0, -1.0)
-
-    result = sign_lin * (10.0 ** log_interp)
-
-    # backendに戻す
-    if backend is not np:
+    # 必要に応じてバックエンドに戻す
+    if backend is not np and CUPY_AVAILABLE:
         return transfer_to_device(result, backend)
     return result
 

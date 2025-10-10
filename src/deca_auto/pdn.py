@@ -188,54 +188,78 @@ def _pdn_impedance_core(
 
     Returns:
         バッチPDNインピーダンス (N_batch, N_freq)
+
+    Notes:
+        - 不要な配列変換を削減
+        - ブロードキャストを効率的に使用
+        - インプレース演算でメモリを節約
     """
-    # 配列変換（すでにGPU上にある場合は転送しない）
-    if not isinstance(count_vectors, type(xp.array([]))):
+    # 配列の正規化（必要な場合のみ変換）
+    if not hasattr(count_vectors, 'shape'):
         count_vectors = xp.asarray(count_vectors)
+    elif xp.__name__ == 'cupy' and not hasattr(count_vectors, '__cuda_array_interface__'):
+        count_vectors = xp.asarray(count_vectors)
+
     if count_vectors.ndim == 1:
         count_vectors = count_vectors[xp.newaxis, :]
 
     n_batch = count_vectors.shape[0]
 
-    # z_cap_arrayとz_mnt_arrayがすでに適切な形状の場合は変換スキップ
-    if not isinstance(z_cap_array, type(xp.array([]))):
+    # z_cap_arrayとz_mnt_arrayの正規化（すでに適切な形状の場合はスキップ）
+    if not hasattr(z_cap_array, 'shape'):
         z_cap_array = xp.asarray(z_cap_array)
-    if not isinstance(z_mnt_array, type(xp.array([]))):
+    if not hasattr(z_mnt_array, 'shape'):
         z_mnt_array = xp.asarray(z_mnt_array)
 
-    # ブロードキャスト（必要な場合のみ）
+    # ブロードキャスト（メモリコピーなし）
     if z_cap_array.ndim == 2:
-        # broadcast_toは配列のコピーを作らないのでメモリ効率的
-        z_cap_array = xp.broadcast_to(z_cap_array, (n_batch,) + z_cap_array.shape)
+        z_cap_broadcast = xp.broadcast_to(z_cap_array, (n_batch,) + z_cap_array.shape)
+    else:
+        z_cap_broadcast = z_cap_array
+
     if z_mnt_array.ndim == 2:
-        z_mnt_array = xp.broadcast_to(z_mnt_array, (n_batch,) + z_mnt_array.shape)
+        z_mnt_broadcast = xp.broadcast_to(z_mnt_array, (n_batch,) + z_mnt_array.shape)
+    else:
+        z_mnt_broadcast = z_mnt_array
 
-    if z_cap_array.shape[0] != n_batch or z_mnt_array.shape[0] != n_batch:
-        raise ValueError("コンデンサ配列とカウントベクトルのバッチ数が一致していません")
-
-    # マウントインピーダンスを加算（インプレース演算で最適化）
-    z_with_mount = z_cap_array + z_mnt_array
+    # マウントインピーダンスを加算
+    z_with_mount = z_cap_broadcast + z_mnt_broadcast
     n_caps = z_with_mount.shape[1]
 
-    # VRMアドミタンスの初期化（tileの代わりにブロードキャストを使用）
+    # VRMアドミタンスの初期化（効率的なブロードキャスト）
     y_vrm = parasitic_elements['y_vrm']
     y_total = xp.empty((n_batch, len(y_vrm)), dtype=y_vrm.dtype)
-    y_total[:] = y_vrm  # ブロードキャスト代入
+    y_total[:] = y_vrm
 
+    # ラダー回路の計算（逆順）
     for cap_idx in range(n_caps - 1, -1, -1):
+        # 使用されているコンデンサのインデックスを取得
         idx = xp.where(count_vectors[:, cap_idx] > 0)[0]
         if idx.size == 0:
             continue
 
-        counts = count_vectors[idx, cap_idx].astype(z_with_mount.dtype, copy=False)
+        # カウント数とインピーダンス
+        counts = count_vectors[idx, cap_idx]
+        if counts.dtype != z_with_mount.dtype:
+            counts = counts.astype(z_with_mount.dtype, copy=False)
+
+        # コンデンサのアドミタンス
         inv_z_cm = safe_divide(1.0, z_with_mount[idx, cap_idx, :], fill_value=0.0, xp=xp)
-        y_cm = counts[:, None] * inv_z_cm
+        y_cm = counts[:, xp.newaxis] * inv_z_cm
 
+        # 直列インピーダンス
         z_series = parasitic_elements['z_sN'] + safe_divide(1.0, y_cm, fill_value=0.0, xp=xp)
-        y_total[idx] = y_total[idx] + safe_divide(1.0, z_series, fill_value=0.0, xp=xp)
 
+        # トータルアドミタンスに追加（インプレース）
+        y_total[idx] += safe_divide(1.0, z_series, fill_value=0.0, xp=xp)
+
+    # プレーナ容量を追加
     y_with_planar = y_total + parasitic_elements['y_p']
+
+    # Spreadingインピーダンス
     z_after_spreading = parasitic_elements['z_s'] + safe_divide(1.0, y_with_planar, fill_value=0.0, xp=xp)
+
+    # Viaインピーダンス
     z_pdn = parasitic_elements['z_v'] + z_after_spreading
 
     return z_pdn

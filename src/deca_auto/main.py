@@ -19,9 +19,12 @@ from deca_auto.utils import (
     logger, get_backend, get_gpu_info, get_vram_budget,
     generate_frequency_grid, create_evaluation_mask, create_target_mask,
     Timer, memory_cleanup, get_progress_bar, transfer_to_device,
-    get_dtype, ensure_numpy, to_float, get_custom_mask_freq_range
+    get_dtype, ensure_numpy, to_float, get_custom_mask_freq_range,
 )
-from deca_auto.capacitor import calculate_all_capacitor_impedances
+from deca_auto.capacitor import (
+    calculate_all_capacitor_impedances,
+    estimate_capacitance_from_impedance
+)
 from deca_auto.pdn import calculate_pdn_impedance_batch, prepare_pdn_components
 from deca_auto.evaluator import evaluate_combinations, extract_top_k, monte_carlo_evaluation
 from deca_auto.excel_out import export_to_excel
@@ -403,16 +406,12 @@ def run_optimization(config: UserConfig,
         if cap_config and 'C' in cap_config and cap_config['C'] is not None:
             capacitances[name] = to_float(cap_config['C'], 1e-6)
         else:
-            # インピーダンスから容量推定（CPUで実行）
+            # インピーダンスから容量推定（utils.pyの統合版を使用）
             z_c_np = ensure_numpy(cap_impedances[name])
             f_grid_np = ensure_numpy(f_grid)
-            omega = 2 * np.pi * f_grid_np
-            # 虚部からの容量推定（効率化）
-            omega_imag = omega * np.imag(z_c_np)
-            # 極小値を避けるためのクリッピング
-            omega_imag_safe = np.where(np.abs(omega_imag) < 1e-30, 1e-30, omega_imag)
-            c_estimated = -1.0 / omega_imag_safe
-            capacitances[name] = float(np.median(c_estimated))  # 平均の代わりに中央値を使用（外れ値に強い）
+            capacitances[name] = estimate_capacitance_from_impedance(
+                z_c_np, f_grid_np, method='median'  # 中央値でロバストに推定
+            )
 
     # ソート
     sorted_cap_names = sorted(capacitor_names, key=lambda n: capacitances[n])
