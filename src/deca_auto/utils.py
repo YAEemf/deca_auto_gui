@@ -737,23 +737,30 @@ def safe_divide(numerator: Any, denominator: Any, fill_value: float = 0.0,
 
 # プログレスバー用ヘルパー
 def get_progress_bar(iterable, desc: str = None, total: int = None,
-                    disable: bool = False):
+                     disable: bool = False, dynamic: bool = True):
     """
-    tqdmプログレスバーを取得
-    
+    tqdmプログレスバーを取得（ターミナル幅に追従可）
+
     Args:
         iterable: イテラブル
         desc: 説明文
         total: 総数
         disable: 無効化フラグ
-    
+        dynamic: ターミナル幅に追従させる（dynamic_ncols）
+
     Returns:
         tqdmオブジェクト
     """
     try:
         from tqdm import tqdm
-        return tqdm(iterable, desc=desc, total=total, disable=disable,
-                   bar_format='{l_bar}{bar:30}{r_bar}{bar:-10b}')
+        # bar_format を指定しないか、最小限に留める
+        return tqdm(
+            iterable,
+            desc=desc,
+            total=total,
+            disable=disable,
+            dynamic_ncols=dynamic,
+        )
     except ImportError:
         logger.warning("tqdmが利用できません")
         return iterable
