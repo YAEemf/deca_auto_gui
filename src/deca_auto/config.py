@@ -19,7 +19,7 @@ class CapacitorConfig:
     name: str
     path: Optional[str] = ""    # SPICEモデルパス
     C: Optional[float] = 0      # 容量値 [F]
-    ESR: float = 15e-3          # 等価直列抵抗 [Ω]
+    ESR: float = 10e-3          # 等価直列抵抗 [Ω]
     ESL: float = 0.5e-9         # 等価直列インダクタンス [H]
     L_mnt: Optional[float] = 0.5e-9  # マウントインダクタンス [H]
     MIN: Optional[int] = None   # 最小使用数
@@ -32,7 +32,7 @@ class UserConfig:
     
     # 周波数グリッド設定
     f_start: float = 1e2  # 開始周波数 [Hz]
-    f_stop: float = 5e8  # 終了周波数 [Hz]
+    f_stop: float = 1e9  # 終了周波数 [Hz]
     num_points_per_decade: int = 256  # DECADEごとの点数
     
     # 評価帯域
@@ -61,7 +61,7 @@ class UserConfig:
     L_s: float = 0.25e-9    # spreadingインダクタンス（VCC直前）[H]
     R_v: float = 0.2e-3     # via抵抗 [Ω]
     L_v: float = 0.5e-9     # viaインダクタンス [H]
-    R_p: float = 15e-3      # プレーナ抵抗 [Ω]
+    R_p: float = 20e-3      # プレーナ抵抗 [Ω]
     C_p: float = 25e-12     # プレーナ容量 [F]
     tan_delta_p: float = 0.02  # 誘電正接
     
@@ -71,18 +71,18 @@ class UserConfig:
     
     # コンデンサリスト
     capacitors: List[Dict[str, Any]] = field(default_factory=lambda: [
-        {"name": "C_0603_0.1u", "C": 0.1e-6, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_0.22u", "C": 0.22e-6, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_0.33u", "C": 0.33e-6, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_0.47u", "C": 0.47e-6, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_1u", "C": 1e-6, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_2.2u", "C": 2.2e-6, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_3.3u", "C": 3.3e-6, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_4.7u", "C": 4.7e-6, "ESR": 15e-3, "ESL": 0.5e-9},
-        {"name": "C_1608_10u", "C": 10e-6, "ESR": 15e-3, "ESL": 0.8e-9},
-        {"name": "C_2012_22u", "C": 22e-6, "ESR": 15e-3, "ESL": 1.0e-9},
-        {"name": "C_2012_33u", "C": 33e-6, "ESR": 15e-3, "ESL": 1.0e-9},
-        {"name": "C_2012_47u", "C": 47e-6, "ESR": 15e-3, "ESL": 1.0e-9},
+        {"name": "C_0603_0.1u", "C": 0.1e-6, "ESR": 10e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_0.22u", "C": 0.22e-6, "ESR": 10e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_0.33u", "C": 0.33e-6, "ESR": 10e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_0.47u", "C": 0.47e-6, "ESR": 10e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_1u", "C": 1e-6, "ESR": 10e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_2.2u", "C": 2.2e-6, "ESR": 10e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_3.3u", "C": 3.3e-6, "ESR": 10e-3, "ESL": 0.5e-9},
+        {"name": "C_0603_4.7u", "C": 4.7e-6, "ESR": 10e-3, "ESL": 0.5e-9},
+        {"name": "C_1608_10u", "C": 10e-6, "ESR": 10e-3, "ESL": 0.8e-9},
+        {"name": "C_2012_22u", "C": 22e-6, "ESR": 10e-3, "ESL": 1.0e-9},
+        {"name": "C_2012_33u", "C": 33e-6, "ESR": 10e-3, "ESL": 1.0e-9},
+        {"name": "C_2012_47u", "C": 47e-6, "ESR": 10e-3, "ESL": 1.0e-9},
         {"name": "C_Poly_100u", "C": 100e-6, "ESR": 100e-3, "ESL": 1.5e-9},
     ])
     
@@ -97,7 +97,7 @@ class UserConfig:
     weight_max: float = 0.2
     weight_area: float = 1.0
     weight_mean: float = 0.4
-    weight_anti: float = 0.2
+    weight_anti: float = 0.3
     weight_flat: float = 0.1
     weight_under: float = 0.1
     weight_parts: float = 0.1

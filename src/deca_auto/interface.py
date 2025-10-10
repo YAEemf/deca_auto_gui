@@ -593,7 +593,7 @@ def create_settings_tab():
 
         # RLCモードの場合はデフォルト値、SPICEモードの場合は設定値(なければ0)
         c_val = cap.get('C', 0.0 if not has_path else 0.0)
-        esr_val = cap.get('ESR', 15e-3 if not has_path else 0.0)
+        esr_val = cap.get('ESR', 10e-3 if not has_path else 0.0)
         esl_val = cap.get('ESL', 0.5e-9 if not has_path else 0.0)
 
         cap_data.append({
@@ -637,7 +637,7 @@ def create_settings_tab():
             if not has_path:
                 # RLCモード: デフォルト値を使用
                 c_val = parse_value(row['C [F]'], 0.0)
-                esr_val = parse_value(row['ESR [Ω]'], 15e-3)
+                esr_val = parse_value(row['ESR [Ω]'], 10e-3)
                 esl_val = parse_value(row['ESL [H]'], 0.5e-9)
             else:
                 # SPICEモード: 値が指定されていればそれを使用、なければ0

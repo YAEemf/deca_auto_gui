@@ -253,7 +253,7 @@ def calculate_rlc_impedance(cap_config: Dict, f_grid: np.ndarray,
     """
     # パラメータ取得（デフォルト値使用）
     C = to_float(cap_config.get('C'), 1e-6)
-    ESR = to_float(cap_config.get('ESR'), 15e-3)
+    ESR = to_float(cap_config.get('ESR'), 10e-3)
     ESL = to_float(cap_config.get('ESL'), 0.5e-9)
     
     # L_mntの処理：Noneの場合はデフォルト値を使用
