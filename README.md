@@ -32,6 +32,12 @@ python -m deca_auto
 ```bash
 python -m deca_auto --no-gui --config config.toml
 ```
+[option]
+--no-search       探索を行わずZ_cのみ計算
+--force-numpy     GPUを使わずCPUのみで探索
+--cuda [識別番号]   使用するCUDAデバイスを指定
+--verbose         詳細なログ出力
+--output          サマリExcelの出力ディレクトリ
 
 ### 2. 設定方法
 以下のいずれかでコンデンサを定義します：
