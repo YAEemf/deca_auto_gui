@@ -20,6 +20,10 @@
 ## 使い方
 
 ### 1. 実行方法
+#### インストール
+```bash
+python -m pip install -e .
+```
 #### 通常起動
 ```bash
 python -m deca_auto
