@@ -35,7 +35,7 @@ python -m deca_auto
 ```
 #### CLI（tomlを渡さないとconfig.pyのデフォルト値で探索します）
 ```bash
-python -m deca_auto --config config.toml
+python -m deca_auto --no-gui --config config.toml
 ```
 
 ### 2. 設定方法
