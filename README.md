@@ -2,8 +2,8 @@
 
 **Deca-Auto: Automated Optimization of Decoupling Capacitor Combinations in PDN**
 
-デカップリングコンデンサの組み合わせ最適解を自動探索するツールです。
-定義されたコンデンサの中から、アンチレゾナンスの少ない優れた合成インピーダンスを持つ組み合わせを自動で探索します。
+デカップリングコンデンサの組み合わせ最適解を自動探索するツールです。  
+定義されたコンデンサの中から、アンチレゾナンスの少ない優れた合成インピーダンスを持つ組み合わせを自動で探索します。  
 旧CLI版(https://github.com/YAEemf/deca_auto.git) より大幅に機能と探索速度および評価精度が向上しています。
 
 !["実行時スクショ"](Screenshot_main.png)
@@ -39,7 +39,7 @@ python -m deca_auto --no-gui --config config.toml
 --verbose         詳細なログ出力
 --output          サマリExcelの出力ディレクトリ
 
-### 2. 設定方法
+### 2. 設定方法（全ての数値は指数表記に対応しています）
 以下のいずれかでコンデンサを定義します：
 
 - **SPICEモデルを利用する** 
@@ -50,12 +50,9 @@ python -m deca_auto --no-gui --config config.toml
 
 ※組み合わせにおけるコンデンサの個数上限に加えて、各コンデンサの使用個数範囲も「使用数範囲」欄で指定できます。
 
-入力例：
-
-3（そのコンデンサを3個必ず使う）
-
--5（そのコンデンサを最大5個使う）
-
+入力例：  
+3（そのコンデンサを3個必ず使う）  
+-5（そのコンデンサを最大5個使う）  
 2-（そのコンデンサを2個以上使う）
 
 
@@ -78,6 +75,7 @@ python -m deca_auto --no-gui --config config.toml
 
 ## 👤 Author
 - YAE
+- https://x.com/nihon_niosumai （Twitter）
 
 ## 📄 License
 - MIT (お好きに役立ててください)
