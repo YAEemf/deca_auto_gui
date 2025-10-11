@@ -371,12 +371,14 @@ def run_optimization(config: UserConfig,
     eval_mask = create_evaluation_mask(f_grid, eval_f_L, eval_f_H, xp)
     logger.info(f"評価帯域内の周波数点数: {xp.sum(eval_mask)}")
     
-    # 目標マスク生成
+    # 目標マスク生成（モード対応）
     target_mask = create_target_mask(
         f_grid,
         config.z_target,
         config.z_custom_mask,
-        xp
+        xp,
+        mode=config.target_impedance_mode,
+        config=config
     )
     
     # コンデンサインピーダンス計算

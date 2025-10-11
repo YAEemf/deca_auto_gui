@@ -675,27 +675,138 @@ def create_settings_tab():
         st.success(get_localized_text("update_caplist", config))
 
     st.divider()
-    
+
     # 目標マスク設定
     st.subheader(get_localized_text('target_mask', config))
-    
-    # カスタムマスクの確認(TOMLから読み込まれている場合も考慮)
-    has_custom_mask = config.z_custom_mask is not None and len(config.z_custom_mask) > 0
-    
-    use_custom = st.checkbox(
-        get_localized_text('use_custom_mask', config),
-        value=has_custom_mask
+
+    # モード選択
+    mode_options = ["auto", "flat", "custom"]
+    mode_labels = {
+        "auto": "Auto (自動計算)",
+        "flat": "Flat (一定)",
+        "custom": "Custom (カスタムマスク)"
+    }
+
+    current_mode_index = mode_options.index(config.target_impedance_mode) if config.target_impedance_mode in mode_options else 0
+    selected_mode = st.selectbox(
+        "Target impedance mode",
+        options=mode_options,
+        format_func=lambda x: mode_labels[x],
+        index=current_mode_index,
+        key="target_impedance_mode_selector"
     )
-    
-    if not use_custom:
+    config.target_impedance_mode = selected_mode
+
+    # モードに応じたパラメーター表示
+    if selected_mode == "flat":
+        # フラットモード: 一定入力
         new_target = parse_value(
-            st.text_input("Target impedance [Ω]", format_value(config.z_target)),
+            st.text_input("Target impedance [Ω]", format_value(config.z_target), key="flat_z_target"),
             config.z_target
         )
         if new_target is not None:
             config.z_target = new_target
-        config.z_custom_mask = None
-    else:
+
+    elif selected_mode == "auto":
+        # 自動計算モード: 電源仕様から計算
+        st.markdown("**電源仕様パラメーター**")
+
+        # 電源電圧
+        v_supply_val = parse_value(
+            st.text_input("Supply voltage [V]", format_value(config.v_supply), key="auto_v_supply"),
+            config.v_supply
+        )
+        if v_supply_val is not None:
+            config.v_supply = v_supply_val
+
+        # リップル指定方法の選択
+        ripple_mode = st.radio(
+            "Ripple specification",
+            options=["ratio", "voltage"],
+            format_func=lambda x: "Ripple ratio [%]" if x == "ratio" else "Ripple voltage [V]",
+            index=0 if config.ripple_ratio is not None else 1,
+            key="auto_ripple_mode"
+        )
+
+        if ripple_mode == "ratio":
+            ripple_ratio_val = parse_value(
+                st.text_input("Ripple ratio [%]", format_value(config.ripple_ratio or 5.0), key="auto_ripple_ratio"),
+                config.ripple_ratio or 5.0
+            )
+            if ripple_ratio_val is not None:
+                config.ripple_ratio = ripple_ratio_val
+                config.ripple_voltage = None
+        else:
+            ripple_voltage_val = parse_value(
+                st.text_input("Ripple voltage [V]", format_value(config.ripple_voltage or 0.05), key="auto_ripple_voltage"),
+                config.ripple_voltage or 0.05
+            )
+            if ripple_voltage_val is not None:
+                config.ripple_voltage = ripple_voltage_val
+                config.ripple_ratio = None
+
+        # 最大電流
+        i_max_val = parse_value(
+            st.text_input("Max current [A]", format_value(config.i_max), key="auto_i_max"),
+            config.i_max
+        )
+        if i_max_val is not None:
+            config.i_max = i_max_val
+
+        # 過渡電流指定方法の選択
+        transient_mode = st.radio(
+            "Transient current specification",
+            options=["activity", "current"],
+            format_func=lambda x: "Switching activity [0-1]" if x == "activity" else "Transient current [A]",
+            index=0 if config.switching_activity is not None else 1,
+            key="auto_transient_mode"
+        )
+
+        if transient_mode == "activity":
+            switching_activity_val = parse_value(
+                st.text_input("Switching activity [0-1]", format_value(config.switching_activity or 0.5), key="auto_switching_activity"),
+                config.switching_activity or 0.5
+            )
+            if switching_activity_val is not None:
+                config.switching_activity = switching_activity_val
+                config.i_transient = None
+        else:
+            i_transient_val = parse_value(
+                st.text_input("Transient current [A]", format_value(config.i_transient or 5.0), key="auto_i_transient"),
+                config.i_transient or 5.0
+            )
+            if i_transient_val is not None:
+                config.i_transient = i_transient_val
+                config.switching_activity = None
+
+        # デザインマージン
+        design_margin_val = parse_value(
+            st.text_input("Design margin [%]", format_value(config.design_margin), key="auto_design_margin"),
+            config.design_margin
+        )
+        if design_margin_val is not None:
+            config.design_margin = design_margin_val
+
+        # 計算結果のプレビュー
+        try:
+            from deca_auto.utils import calculate_target_impedance_auto
+            z_auto = calculate_target_impedance_auto(
+                config.v_supply,
+                config.ripple_ratio,
+                config.ripple_voltage,
+                config.i_max,
+                config.switching_activity,
+                config.i_transient,
+                config.design_margin
+            )
+            st.info(f"計算された目標インピーダンス: {format_value(z_auto)} Ω")
+        except Exception as e:
+            st.warning(f"計算エラー: {e}")
+
+    elif selected_mode == "custom":
+        # カスタムマスクモード
+        st.markdown("**カスタムインピーダンスマスク**")
+
         # カスタムマスク編集
         if config.z_custom_mask:
             # 既存のカスタムマスクを表示
@@ -716,15 +827,15 @@ def create_settings_tab():
             mask_data['Frequency [Hz]'] = mask_data['Frequency [Hz]'].apply(format_value)
             mask_data['Impedance [Ω]'] = mask_data['Impedance [Ω]'].apply(format_value)
             config.z_custom_mask = default_mask
-        
+
         edited_mask = st.data_editor(
             mask_data,
             num_rows="dynamic",
             use_container_width=True,
             key="mask_editor"
         )
-        
-        if st.button(get_localized_text("update_mask", config)):
+
+        if st.button(get_localized_text("update_mask", config), key="update_custom_mask_button"):
             if len(edited_mask) > 0:
                 mask_points = []
                 for _, row in edited_mask.iterrows():
@@ -743,10 +854,14 @@ def create_settings_tab():
                             st.session_state.frequency_grid,
                             config.z_target,
                             config.z_custom_mask,
-                            xp
+                            xp,
+                            mode=config.target_impedance_mode,
+                            config=config
                         ))
                 else:
                     st.error("有効なマスクポイントがありません")
+            else:
+                st.error("マスクポイントを少なくとも1つ設定してください")
 
 
 @st.fragment
@@ -767,7 +882,7 @@ def render_zpdn_results():
     config = st.session_state.config
 
     # グラフ2: Top-kのZ_pdn特性
-    st.subheader("PDNインピーダンス特性 |Z_pdn| (Top-k)")
+    st.subheader("PDNインピーダンス特性 |Z_pdn|")
     if st.session_state.top_k_results and st.session_state.frequency_grid is not None:
         try:
             zpdn_chart = create_zpdn_chart()
@@ -1332,7 +1447,9 @@ def calculate_zc_only():
             f_grid,
             config.z_target,
             config.z_custom_mask,
-            xp
+            xp,
+            mode=config.target_impedance_mode,
+            config=config
         )
         st.session_state.target_mask = ensure_numpy(target_mask)
         

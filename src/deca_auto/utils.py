@@ -627,32 +627,127 @@ def create_evaluation_mask(f_grid: np.ndarray, f_L: float, f_H: float,
     return (f_grid >= f_L) & (f_grid <= f_H)
 
 
-# 目標マスクの生成
-def create_target_mask(f_grid: np.ndarray, z_target: float,
-                      z_custom_mask: Optional[list] = None,
-                      xp: Any = np) -> np.ndarray:
+# 目標インピーダンス計算（自動モード）
+def calculate_target_impedance_auto(
+    v_supply: float,
+    ripple_ratio: Optional[float],
+    ripple_voltage: Optional[float],
+    i_max: float,
+    switching_activity: Optional[float],
+    i_transient: Optional[float],
+    design_margin: float
+) -> float:
     """
-    目標インピーダンスマスクを生成
-    
+    自動計算モードで目標インピーダンスを計算
+
+    Args:
+        v_supply: 電源電圧 [V]
+        ripple_ratio: 許容リップル率 [%]
+        ripple_voltage: 許容リップル電圧 [V]
+        i_max: 最大消費電流 [A]
+        switching_activity: 電流変動率 (0-1)
+        i_transient: 過渡電流 [A]
+        design_margin: デザインマージン [%]
+
+    Returns:
+        目標インピーダンス [Ω]
+
+    Notes:
+        理論式: Z_target = (ΔV_ripple × (1 - margin/100)) / I_transient
+    """
+    # 許容リップル電圧の決定
+    if ripple_voltage is not None:
+        delta_v = ripple_voltage
+    elif ripple_ratio is not None:
+        delta_v = v_supply * (ripple_ratio / 100.0)
+    else:
+        raise ValueError("ripple_ratio または ripple_voltage のいずれかを指定する必要があります")
+
+    # 過渡電流の決定
+    if i_transient is not None:
+        i_trans = i_transient
+    elif switching_activity is not None:
+        i_trans = i_max * switching_activity
+    else:
+        # デフォルトとして i_max の 50% を使用
+        i_trans = i_max * 0.5
+
+    # デザインマージンの適用
+    delta_v_design = delta_v * (1.0 - design_margin / 100.0)
+
+    # 目標インピーダンス
+    z_target = delta_v_design / i_trans
+
+    logger.info(
+        f"自動計算モード: V_supply={v_supply}V, ΔV_ripple={delta_v*1000:.2f}mV, "
+        f"I_transient={i_trans}A, margin={design_margin}%, Z_target={z_target*1000:.3f}mΩ"
+    )
+
+    return z_target
+
+
+# 目標マスクの生成（モード対応版）
+def create_target_mask(
+    f_grid: np.ndarray,
+    z_target: float,
+    z_custom_mask: Optional[list] = None,
+    xp: Any = np,
+    mode: str = "flat",
+    config: Any = None
+) -> np.ndarray:
+    """
+    目標インピーダンスマスクを生成（モード対応版）
+
     Args:
         f_grid: 周波数グリッド
         z_target: フラット目標値
         z_custom_mask: カスタムマスク [(freq, impedance), ...]
         xp: バックエンドモジュール
-    
+        mode: 目標インピーダンスモード ("flat", "auto", "custom")
+        config: 設定オブジェクト（autoモードで必要）
+
     Returns:
         目標マスク
+
+    Notes:
+        - "flat": 単一値のフラット目標
+        - "auto": 電源仕様から自動計算
+        - "custom": カスタムマスク（対数補間）
     """
-    if z_custom_mask is None or len(z_custom_mask) == 0:
+    if mode == "flat":
         # フラット目標
         return xp.full_like(f_grid, z_target)
-    
-    # カスタムマスクの対数補間
-    f_points = xp.array([f for f, _ in z_custom_mask])
-    z_points = xp.array([z for _, z in z_custom_mask])
-    
-    # 対数補間
-    return log_interpolate(f_grid, f_points, z_points, backend=xp)
+
+    elif mode == "auto":
+        # 自動計算モード
+        if config is None:
+            raise ValueError("autoモードではconfigが必要です")
+
+        z_auto = calculate_target_impedance_auto(
+            config.v_supply,
+            config.ripple_ratio,
+            config.ripple_voltage,
+            config.i_max,
+            config.switching_activity,
+            config.i_transient,
+            config.design_margin
+        )
+        return xp.full_like(f_grid, z_auto)
+
+    elif mode == "custom":
+        # カスタムマスク
+        if z_custom_mask is None or len(z_custom_mask) == 0:
+            logger.warning("カスタムマスクが指定されていないため、フラット目標を使用します")
+            return xp.full_like(f_grid, z_target)
+
+        # カスタムマスクの対数補間
+        f_points = xp.array([f for f, _ in z_custom_mask])
+        z_points = xp.array([z for _, z in z_custom_mask])
+
+        return log_interpolate(f_grid, f_points, z_points, backend=xp)
+
+    else:
+        raise ValueError(f"未知の目標インピーダンスモード: {mode}")
 
 
 # バッチ処理ヘルパー

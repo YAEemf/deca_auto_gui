@@ -9,8 +9,14 @@ f_L = 1e3   # 下限周波数 [Hz]
 f_H = 1e8   # 上限周波数 [Hz]
 
 [target]
-# 目標インピーダンス
-z_target = 10e-3    # フラット目標 [Ω]
+# 目標インピーダンスモード
+# "flat": 単一値のフラット目標
+# "auto": 電源仕様から自動計算
+# "custom": カスタムマスク（対数補間）
+target_impedance_mode = "custom"
+
+# フラット目標インピーダンス [Ω]
+z_target = 10e-3
 
 # カスタムマスク（任意）[(freq, impedance), ...]
 # もしマスクの方が評価帯域より広ければマスクの帯域が優先される
@@ -21,6 +27,15 @@ z_custom_mask = [
     [2e6, 8e-3],
     [1e8, 0.45],
 ]
+
+# 自動計算モード用パラメーター
+v_supply = 3.3              # 電源電圧 [V]
+ripple_ratio = 5.0          # 許容リップル率 [%]（ripple_voltageと排他）
+# ripple_voltage = 50e-3    # 許容リップル電圧 [V]（ripple_ratioと排他）
+i_max = 10.0                # 最大消費電流 [A]
+switching_activity = 0.5    # 電流変動率 (0-1)（i_transientと排他）
+# i_transient = 5.0         # 過渡電流 [A]（switching_activityと排他）
+design_margin = 20.0        # デザインマージン [%]
 
 [pdn_parasitic]
 # PDN寄生成分

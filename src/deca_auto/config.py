@@ -35,6 +35,7 @@ class UserConfig:
     f_H: float = 1e8  # 上限周波数 [Hz]
     
     # 目標マスク
+    target_impedance_mode: str = "custom"  # モード: "flat", "auto", "custom"
     z_target: float = 10e-3  # フラット目標インピーダンス [Ω]
     z_custom_mask: Optional[List[Tuple[float, float]]] = field(
         default_factory=lambda: [
@@ -45,6 +46,15 @@ class UserConfig:
             (1e8, 0.45),
         ]
     )  # カスタムマスク [(freq, impedance), ...]
+
+    # 自動計算モード用パラメーター
+    v_supply: float = 3.3  # 電源電圧 [V]
+    ripple_ratio: Optional[float] = 5.0  # 許容リップル率 [%]
+    ripple_voltage: Optional[float] = None  # 許容リップル電圧 [V] (ripple_ratioと排他)
+    i_max: float = 5.0  # 最大消費電流 [A]
+    switching_activity: Optional[float] = 0.5  # 電流変動率 (0-1)
+    i_transient: Optional[float] = None  # 過渡電流 [A] (switching_activityと排他)
+    design_margin: float = 20.0  # デザインマージン [%]
     
     # PDN寄生成分
     R_vrm: float = 15e-3    # VRM ESR [Ω]
@@ -190,7 +200,7 @@ def _load_config_field(config: UserConfig, key: str, value: Any) -> None:
                     mask_list.append((f_val, z_val))
         setattr(config, key, mask_list if mask_list else None)
 
-    elif isinstance(value, str) and key.startswith(("f_", "R_", "L_", "C_", "z_", "tol_", "tan_", "dc_", "mlcc_", "max_vram_", "min_total_", "weight_")):
+    elif isinstance(value, str) and key.startswith(("f_", "R_", "L_", "C_", "z_", "tol_", "tan_", "dc_", "mlcc_", "max_vram_", "min_total_", "weight_", "v_", "i_", "ripple_", "switching_", "design_")):
         try:
             parsed_value = parse_scientific_notation(value)
             setattr(config, key, parsed_value)
@@ -317,7 +327,18 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
         # セクション分けして保存
         sections = {
             "frequency": ["f_start", "f_stop", "num_points_per_decade", "f_L", "f_H"],
-            "target": ["z_target", "z_custom_mask"],
+            "target": [
+                "target_impedance_mode",
+                "z_target",
+                "z_custom_mask",
+                "v_supply",
+                "ripple_ratio",
+                "ripple_voltage",
+                "i_max",
+                "switching_activity",
+                "i_transient",
+                "design_margin"
+            ],
             "pdn_parasitic": ["R_vrm", "L_vrm", "R_sN", "L_sN", "L_mntN", "R_s", "L_s", "R_v", "L_v", "R_p", "C_p", "tan_delta_p"],
             "spice": ["dc_bias", "model_path"],
             "search": ["max_total_parts", "min_total_parts_ratio", "top_k", "shuffle_evaluation", "buffer_limit"],
@@ -387,15 +408,48 @@ def validate_config(config: UserConfig) -> bool:
         assert config.f_H <= config.f_stop, "評価帯域上限は終了周波数以下である必要があります"
         assert config.f_L < config.f_H, "評価帯域が正しく設定されていません"
         
+        # 目標インピーダンスモードの検証
+        assert config.target_impedance_mode in ["flat", "auto", "custom"], \
+            "目標インピーダンスモードは 'flat', 'auto', 'custom' のいずれかである必要があります"
+
+        # 自動計算モードパラメーターの検証
+        if config.target_impedance_mode == "auto":
+            assert config.v_supply > 0, "電源電圧は正の値である必要があります"
+            assert config.i_max > 0, "最大消費電流は正の値である必要があります"
+
+            # ripple_ratio と ripple_voltage は排他的
+            if config.ripple_ratio is not None and config.ripple_voltage is not None:
+                print("警告: ripple_ratio と ripple_voltage が両方設定されています。ripple_ratio を優先します")
+
+            if config.ripple_ratio is not None:
+                assert 0 < config.ripple_ratio <= 100, "許容リップル率は0-100%の範囲である必要があります"
+            elif config.ripple_voltage is not None:
+                assert config.ripple_voltage > 0, "許容リップル電圧は正の値である必要があります"
+            else:
+                raise AssertionError("ripple_ratio または ripple_voltage のいずれかを設定する必要があります")
+
+            # switching_activity と i_transient は排他的
+            if config.switching_activity is not None and config.i_transient is not None:
+                print("警告: switching_activity と i_transient が両方設定されています。i_transient を優先します")
+
+            if config.switching_activity is not None:
+                assert 0 < config.switching_activity <= 1, "電流変動率は0-1の範囲である必要があります"
+
+            if config.i_transient is not None:
+                assert config.i_transient > 0, "過渡電流は正の値である必要があります"
+
+            assert 0 <= config.design_margin <= 100, "デザインマージンは0-100%の範囲である必要があります"
+
         # カスタムマスクの検証
-        if config.z_custom_mask:
-            for i, (f, z) in enumerate(config.z_custom_mask):
-                assert f > 0, f"カスタムマスク[{i}]の周波数は正の値である必要があります"
-                assert z > 0, f"カスタムマスク[{i}]のインピーダンスは正の値である必要があります"
-            
-            # 周波数の昇順チェック
-            freqs = [f for f, _ in config.z_custom_mask]
-            assert freqs == sorted(freqs), "カスタムマスクの周波数は昇順である必要があります"
+        if config.target_impedance_mode == "custom" or config.z_custom_mask:
+            if config.z_custom_mask:
+                for i, (f, z) in enumerate(config.z_custom_mask):
+                    assert f > 0, f"カスタムマスク[{i}]の周波数は正の値である必要があります"
+                    assert z > 0, f"カスタムマスク[{i}]のインピーダンスは正の値である必要があります"
+
+                # 周波数の昇順チェック
+                freqs = [f for f, _ in config.z_custom_mask]
+                assert freqs == sorted(freqs), "カスタムマスクの周波数は昇順である必要があります"
         
         # PDN寄生成分の検証
         assert all(getattr(config, f) >= 0 for f in ["R_vrm", "L_vrm", "R_sN", "L_sN", "L_mntN", "R_s", "L_s", "R_v", "L_v", "R_p", "C_p", "tan_delta_p"]), \
@@ -475,8 +529,8 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "capacitor_list": "コンデンサリスト",
             "update_caplist":"コンデンサリストを更新",
             "apply_change":"変更を適用",
-            "target_mask": "目標マスク",
-            "update_mask":"目標マスクを更新",
+            "target_mask": "目標インピーダンス",
+            "update_mask":"目標インピーダンスを更新",
             "frequency_grid": "周波数グリッド",
             "evaluation_band": "評価帯域",
             "search_settings": "探索設定",
@@ -523,7 +577,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "capacitor_list": "Capacitor List",
             "update_caplist":"Updated the capacitor list",
             "apply_change":"Apply Changes",
-            "target_mask": "Target Mask",
+            "target_mask": "Target Impedance",
             "update_mask":"Updated the custom mask",
             "frequency_grid": "Frequency Grid",
             "evaluation_band": "Evaluation Band",
