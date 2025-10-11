@@ -1,8 +1,3 @@
-"""
-Streamlit GUIモジュール
-GUIとAltairグラフの処理/更新、ユーザー操作、パラメーターの編集と保存
-"""
-
 import os
 import sys
 import threading
@@ -15,7 +10,6 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-# 絶対パスでインポート
 from deca_auto.config import (
     UserConfig, load_config, save_config, validate_config,
     get_localized_text
@@ -36,6 +30,7 @@ if _log_level_str:
         set_log_level(_log_level)
     except (ValueError, TypeError):
         pass
+
 
 MAX_POINTS = 1024
 

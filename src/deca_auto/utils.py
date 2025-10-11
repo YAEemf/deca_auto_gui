@@ -1,8 +1,3 @@
-"""
-共通ユーティリティモジュール
-ログ、タイマ、補間、decimate、型変換ヘルパ、CPU <-> GPU転送、その他共通機能
-"""
-
 import time
 import traceback
 import logging
@@ -12,7 +7,6 @@ from contextlib import contextmanager
 from functools import wraps
 import numpy as np
 
-# CuPyのインポート（利用可能な場合）
 try:
     import cupy as cp
     CUPY_AVAILABLE = True

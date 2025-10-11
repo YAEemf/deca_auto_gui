@@ -1,13 +1,7 @@
-"""
-評価モジュール
-スコア計算、Monte Carloロバスト評価、top_k抽出、結果評価、バッチ処理
-"""
-
 import traceback
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 
-# 絶対パスでインポート
 from deca_auto.config import UserConfig
 from deca_auto.utils import logger, transfer_to_device, safe_divide
 from deca_auto.pdn import calculate_pdn_impedance_monte_carlo, prepare_pdn_components

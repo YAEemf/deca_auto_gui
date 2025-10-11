@@ -1,8 +1,3 @@
-"""
-設定管理モジュール
-USER_CONFIGの定義、検証、TOMLファイルの読み書き
-"""
-
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Union
 import tomlkit

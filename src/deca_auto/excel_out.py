@@ -1,8 +1,3 @@
-"""
-Excel出力モジュール
-XlsxWriterを使用したExcel出力、グラフ作成
-"""
-
 import traceback
 from pathlib import Path
 from datetime import datetime
@@ -10,10 +5,10 @@ from typing import Dict, List, Any
 import numpy as np
 import xlsxwriter
 
-# 絶対パスでインポート  
 from deca_auto.config import UserConfig
 from deca_auto.utils import logger, ensure_numpy, decimate, get_custom_mask_freq_range
 from deca_auto.evaluator import format_combination_name, calculate_score_components
+
 
 ZPDN_PALETTE = [
     "#1f77b4",

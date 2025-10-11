@@ -1,9 +1,3 @@
-"""
-メイン処理モジュール
-全体処理、リソース管理、GPU情報取得、バックエンド決定、
-周波数グリッド生成/評価帯域/マスク生成、VRAMバジェットとチャンク上限サイズ決定
-"""
-
 import os
 import sys
 import time
@@ -13,7 +7,6 @@ from typing import Optional, Dict, List, Tuple, Any, Callable
 import numpy as np
 from dataclasses import dataclass
 
-# 絶対パスでインポート
 from deca_auto.config import UserConfig, validate_config
 from deca_auto.utils import (
     logger, get_backend, get_gpu_info, get_vram_budget,
@@ -29,7 +22,6 @@ from deca_auto.pdn import calculate_pdn_impedance_batch, prepare_pdn_components
 from deca_auto.evaluator import evaluate_combinations, extract_top_k, monte_carlo_evaluation
 from deca_auto.excel_out import export_to_excel
 
-# CuPy条件付きインポート
 try:
     import cupy as cp
     CUPY_AVAILABLE = True

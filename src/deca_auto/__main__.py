@@ -6,8 +6,6 @@ import socket
 from pathlib import Path
 from typing import List, Optional
 import traceback
-
-# 絶対パスでインポート
 import numpy as np
 import logging
 

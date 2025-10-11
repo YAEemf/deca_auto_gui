@@ -1,13 +1,7 @@
-"""
-PDN合成モジュール
-ラダー回路の組み立てとGPU最適化されたインピーダンス並列計算
-"""
-
 import traceback
 from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 
-# 絶対パスでインポート
 from deca_auto.config import UserConfig
 from deca_auto.utils import logger, validate_result, safe_divide
 

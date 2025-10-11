@@ -1,22 +1,15 @@
-"""
-コンデンサインピーダンス計算モジュール
-SPICEモデル読み込み、PySpice ACサンプリング、VectorFitting、RLCフォールバック
-"""
-
 import re
 import traceback
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple, Any, Callable
 import numpy as np
 
-# 絶対パスでインポート
 from deca_auto.config import UserConfig
 from deca_auto.utils import (
     logger, Timer, get_progress_bar, transfer_to_device,
     log_interpolate, validate_result, ensure_numpy, to_float
 )
 
-# 条件付きインポート
 try:
     import PySpice
     import PySpice.Logging.Logging as Logging
