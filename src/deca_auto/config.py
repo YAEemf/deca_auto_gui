@@ -321,6 +321,38 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
                     filtered_capacitors.append(filtered_cap)
             config_dict["capacitors"] = filtered_capacitors
 
+        def _sanitize(value: Any) -> Any:
+            """TOML変換前にNoneを除去"""
+            if value is None:
+                return None
+            if isinstance(value, dict):
+                cleaned_dict = {}
+                for k, v in value.items():
+                    sanitized = _sanitize(v)
+                    if sanitized is not None:
+                        cleaned_dict[k] = sanitized
+                return cleaned_dict
+            if isinstance(value, list):
+                cleaned_list = []
+                for item in value:
+                    sanitized = _sanitize(item)
+                    if sanitized is not None:
+                        cleaned_list.append(sanitized)
+                return cleaned_list
+            if isinstance(value, tuple):
+                cleaned_tuple = tuple(
+                    sanitized for sanitized in (_sanitize(item) for item in value)
+                    if sanitized is not None
+                )
+                return cleaned_tuple if cleaned_tuple else None
+            return value
+
+        # Noneを除去したクリーンな辞書を生成
+        sanitized_config = _sanitize(config_dict)
+        if not isinstance(sanitized_config, dict):
+            sanitized_config = {}
+        config_dict = {key: value for key, value in sanitized_config.items() if value is not None}
+
         # TOMLドキュメント作成
         doc = tomlkit.document()
 
@@ -366,7 +398,10 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
             section = tomlkit.table()
             for key in keys:
                 if key in config_dict:
-                    section[key] = config_dict[key]
+                    value = config_dict[key]
+                    if value is None:
+                        continue
+                    section[key] = value
             if section:
                 doc[section_name] = section
 
