@@ -47,7 +47,7 @@ python -m deca_auto --no-gui --config config.toml
 
 ### 2. コンデンサ設定方法（全ての数値は指数表記に対応）
 コンデンサリスト：
-![""](Cap_list.png)
+<!-- ![""](Cap_list.png) -->
 
 - **SPICEモデルを利用する** 
   `.mod` ファイルのパス（modelディレクトリ内のモデル拡張子は省略可）をGUIのリストまたは `.tomlファイル` に定義。SPICEモデルを指定時はC / ESR / ESLの指定は不要です。
