@@ -434,7 +434,6 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
 
             for candidate in candidates:
                 if candidate.exists():
-                    logger.info(f"{name}: 拡張子を補完してモデル {candidate.name} を使用します")
                     spice_path = candidate
                     break
 
@@ -517,7 +516,15 @@ def calculate_all_capacitor_impedances(config: UserConfig, f_grid: np.ndarray,
     )
     
     for cap_config in progress:
-        name = cap_config['name']
+        raw_name = cap_config.get('name')
+        name = str(raw_name).strip() if raw_name is not None else ""
+        if not name:
+            path_value = cap_config.get('path')
+            inferred = Path(str(path_value)).stem if path_value else ""
+            if not inferred:
+                raise ValueError("コンデンサ設定に名前が見つかりません (path も指定されていません)")
+            name = inferred
+            cap_config['name'] = name
         
         # インピーダンス計算
         z_c, capacitance = calculate_single_capacitor_impedance(

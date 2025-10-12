@@ -43,7 +43,7 @@ def export_to_excel(results: Dict, config: UserConfig) -> bool:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # ファイル名生成
-        timestamp = datetime.now().strftime("%Y%m%d%H%M")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
         filename = f"{config.excel_name}_{timestamp}.xlsx"
         filepath = output_dir / filename
         

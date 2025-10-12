@@ -8,6 +8,34 @@ import numpy as np
 from deca_auto.utils import unwrap_toml_value, to_float, to_int, parse_scientific_notation
 
 
+def _derive_name_from_path(path_value: Any) -> Optional[str]:
+    """パスからファイル名（拡張子なし）を抽出"""
+    if path_value is None:
+        return None
+    try:
+        path_str = str(path_value).strip()
+    except Exception:
+        return None
+    if not path_str:
+        return None
+    try:
+        stem = Path(path_str).stem
+    except Exception:
+        return None
+    return stem or None
+
+
+def _ensure_unique_name(name_candidate: str, existing: set[str]) -> str:
+    """既存集合と重複しない一意な名前を生成"""
+    base = name_candidate
+    suffix = 1
+    while name_candidate in existing:
+        name_candidate = f"{base}_{suffix}"
+        suffix += 1
+    existing.add(name_candidate)
+    return name_candidate
+
+
 @dataclass
 class CapacitorConfig:
     """コンデンサ設定"""
@@ -152,40 +180,58 @@ def _load_config_field(config: UserConfig, key: str, value: Any) -> None:
     """
     # 特殊処理が必要なフィールド
     if key == "capacitors" and value is not None:
-        cap_list = []
+        cap_list: List[Dict[str, Any]] = []
+        existing_names: set[str] = set()
+
         for cap_data in value:
-            cap_dict = {}
+            if not isinstance(cap_data, dict):
+                continue
+
+            cap_dict: Dict[str, Any] = {}
             for k, v in cap_data.items():
                 v_unwrapped = unwrap_toml_value(v)
 
-                # 数値フィールド（C, ESR, ESL, L_mnt）
                 if k in ["C", "ESR", "ESL", "L_mnt"]:
                     if isinstance(v_unwrapped, str):
                         cap_dict[k] = parse_scientific_notation(v_unwrapped)
                     elif v_unwrapped is not None:
                         cap_dict[k] = to_float(v_unwrapped, 0.0)
 
-                # 整数フィールド（MIN, MAX）
                 elif k in ["MIN", "MAX"]:
                     if v_unwrapped is not None:
                         cap_dict[k] = to_int(v_unwrapped, None)
 
-                # path フィールド
                 elif k == "path":
-                    cap_dict[k] = v_unwrapped if v_unwrapped is not None else ""
+                    if v_unwrapped is not None:
+                        cap_dict[k] = str(v_unwrapped).strip()
 
-                # name フィールド
                 elif k == "name":
-                    cap_dict[k] = v_unwrapped if v_unwrapped is not None else ""
+                    if v_unwrapped is not None:
+                        cap_dict[k] = str(v_unwrapped).strip()
 
-                # その他のフィールド
                 else:
                     if v_unwrapped is not None:
                         cap_dict[k] = v_unwrapped
 
-            # name が存在する場合のみ追加
-            if cap_dict.get("name"):
-                cap_list.append(cap_dict)
+            path_val = cap_dict.get("path", "")
+            raw_name = cap_dict.get("name", "")
+            if isinstance(raw_name, str):
+                raw_name = raw_name.strip()
+            else:
+                raw_name = str(raw_name).strip() if raw_name is not None else ""
+
+            if not raw_name:
+                inferred = _derive_name_from_path(path_val)
+                raw_name = inferred.strip() if inferred else ""
+
+            if not raw_name:
+                # 名前を特定できなければスキップ
+                continue
+
+            final_name = _ensure_unique_name(raw_name, existing_names)
+            cap_dict["name"] = final_name
+            cap_list.append(cap_dict)
+
         setattr(config, key, cap_list)
 
     elif key == "z_custom_mask" and value is not None:

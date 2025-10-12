@@ -615,43 +615,61 @@ def create_settings_tab():
 
     # 編集内容を反映
     if st.button(get_localized_text("update_caplist", config)):
-        new_caps = []
+        new_caps: List[Dict[str, Any]] = []
+        existing_names: set[str] = set()
+
         for _, row in edited_df.iterrows():
-            # name が空の場合はスキップ
-            name_val = str(row['Name']).strip() if row['Name'] else ""
+            raw_name = row.get('Name')
+            if pd.isna(raw_name):
+                name_val = ""
+            else:
+                name_val = str(raw_name).strip()
+
+            raw_path = row.get('Path')
+            if pd.isna(raw_path):
+                path_val = ""
+            else:
+                path_val = str(raw_path).strip()
+
+            has_path = bool(path_val)
+
+            if not name_val and has_path:
+                base_name = Path(path_val).stem
+                candidate = base_name or ""
+                suffix = 1
+                while candidate in existing_names and candidate:
+                    candidate = f"{base_name}_{suffix}"
+                    suffix += 1
+                name_val = candidate
+
             if not name_val:
                 continue
 
-            # path の処理(空文字列を許容、None は空文字列に変換)
-            path_val = str(row['Path']).strip() if row['Path'] else ""
-
-            # path が空の場合はRLCモードとしてデフォルト値を使用
-            has_path = bool(path_val)
+            base_name = name_val
+            suffix = 1
+            while name_val in existing_names:
+                name_val = f"{base_name}_{suffix}"
+                suffix += 1
+            existing_names.add(name_val)
 
             if not has_path:
-                # RLCモード: デフォルト値を使用
                 c_val = parse_value(row['C [F]'], 0.0)
                 esr_val = parse_value(row['ESR [Ω]'], 15e-3)
                 esl_val = parse_value(row['ESL [H]'], 2e-10)
             else:
-                # SPICEモード: 値が指定されていればそれを使用、なければ0
                 c_val = parse_value(row['C [F]'], 0.0)
                 esr_val = parse_value(row['ESR [Ω]'], 0.0)
                 esl_val = parse_value(row['ESL [H]'], 0.0)
 
-            # L_mnt の処理
             l_mnt_val = parse_value(row['L_mnt [H]'], config.L_mntN)
 
-            # 使用範囲の処理
             try:
                 min_count, max_count = parse_usage_range_input(row.get('usage_range', ''), config.max_total_parts)
             except ValueError as exc:
                 st.error(str(exc))
                 return
 
-            # コンデンサ辞書を構築(None を含めない)
-            cap = {'name': name_val}
-
+            cap: Dict[str, Any] = {'name': name_val}
             if path_val:
                 cap['path'] = path_val
 
