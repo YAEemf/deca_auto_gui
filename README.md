@@ -1,8 +1,8 @@
-# デカ・オート (Deca-Auto)
+## デカ・オート (Deca-Auto)
 
 **Deca-Auto: Automated Optimization of Decoupling Capacitor Combinations in PDN**
 
-デカップリングコンデンサの組み合わせ最適解を自動探索するツールです。  
+`デカップリングコンデンサ`の組み合わせ最適解を自動探索するツールです。  
 定義されたコンデンサの中から、アンチレゾナンスの少ない優れた合成インピーダンスを持つ組み合わせを自動で探索します。  
 旧CLI版(https://github.com/YAEemf/deca_auto.git) より大幅に機能/探索速度/評価精度が向上しています。  
 **NVIDIA GPU無しでも動くようにしました！--force-numpyを指定してください。**
@@ -11,8 +11,7 @@
 ---
 
 ## 概要
-- デカップリングコンデンサの組み合わせ自動探索
-- MurataやTDK提供の主要な`SPICE`モデルを利用可能（.modファイル）
+- MurataやTDK提供の主要な2端子`SPICE`モデルを利用可能（.modファイル）
 - コンデンサの基本パラメータ（C / ESR / ESL）を自分で定義して利用可能
 - 実装したPDN（組み合わせにおけるコンデンサは常にLoad側から容量が小さい順に並ぶ）
 
@@ -38,7 +37,7 @@ python -m deca_auto
 ```bash
 python -m deca_auto --no-gui --config config.toml
 ```  
-複数のtomlが渡された場合はそれぞれの条件で順番に探索を実行します。
+**複数のtomlが渡された場合はそれぞれの条件で順番に探索を実行します。**
 ```bash
 --config confg1.toml config2.toml ...
 ```
@@ -54,10 +53,10 @@ python -m deca_auto --no-gui --config config.toml
 ![""](Cap_list.png)
 
 - **SPICEモデルを利用する** 
-  `.mod` ファイルパス（modelディレクトリ内のモデルはファイル名のみでOK）をGUIのリストまたは `.tomlファイル` に定義。SPICEモデルを指定時は C / ESR / ESL の指定は不要です。
+  `.mod` ファイルパス（modelディレクトリ内のモデルはファイル名のみでOK）をGUIのリストまたは `.tomlファイル` に定義。SPICEモデルを指定時は C / ESR / ESL の指定は不要です。名前を省略した場合、自動でファイル名を使います。
   
 - **LCRパラメータを直接定義する**  
-  各コンデンサの C / ESR / ESL のパラメータをGUIのリストまたは`.tomlファイル` に定義。ESR、ESLを省略した場合はデフォルト値（10mΩ、0.5nH）が適用されます。
+  各コンデンサの C / ESR / ESL のパラメータをGUIのリストまたは`.tomlファイル` に定義。ESR、ESLを省略した場合はデフォルト値（15mΩ、0.2nH）が適用されます。
 
 `L_mnt`：実装インダクタンス（任意）
 
