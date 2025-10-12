@@ -231,7 +231,7 @@ def apply_vector_fitting(z_samples: np.ndarray, f_grid: np.ndarray,
 
 
 def calculate_rlc_impedance(cap_config: Dict, f_grid: np.ndarray,
-                           xp: Any = np, L_mntN: float = 0.5e-9) -> np.ndarray:
+                           xp: Any = np, L_mntN: float = 0.2e-10) -> np.ndarray:
     """
     RLCモデルでインピーダンスを計算（フォールバック）
     
@@ -246,8 +246,8 @@ def calculate_rlc_impedance(cap_config: Dict, f_grid: np.ndarray,
     """
     # パラメータ取得（デフォルト値使用）
     C = to_float(cap_config.get('C'), 1e-6)
-    ESR = to_float(cap_config.get('ESR'), 10e-3)
-    ESL = to_float(cap_config.get('ESL'), 0.5e-9)
+    ESR = to_float(cap_config.get('ESR'), 15e-3)
+    ESL = to_float(cap_config.get('ESL'), 2e-10)
     
     # L_mntの処理：Noneの場合はデフォルト値を使用
     L_mnt = to_float(cap_config.get('L_mnt'), L_mntN)
@@ -392,7 +392,7 @@ def estimate_rlc_parameters(z_c: np.ndarray, f_grid: np.ndarray) -> Tuple[float,
 
 def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
                                         model_path: Path, dc_bias: float,
-                                        xp: Any = np, L_mntN: float = 0.5e-9,
+                                        xp: Any = np, L_mntN: float = 0.2e-10,
                                         dtype: Optional[Any] = None) -> Tuple[np.ndarray, float]:
     """
     単一コンデンサのインピーダンスを計算

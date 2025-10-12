@@ -3,7 +3,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple, Any, Callable
+from typing import Optional, Dict, List, Tuple, Any, Callable, Iterable
 import numpy as np
 from dataclasses import dataclass
 
@@ -40,8 +40,10 @@ class OptimizationContext:
     dtype_c: np.dtype
     dtype_r: np.dtype
     f_grid: np.ndarray
+    f_grid_host: np.ndarray
     eval_mask: np.ndarray
     target_mask: np.ndarray
+    target_mask_host: np.ndarray
     vram_budget: int
     chunk_size_limit: int
     capacitor_impedances: Dict[str, np.ndarray]
@@ -54,15 +56,205 @@ class OptimizationContext:
     z_without_decap: Optional[np.ndarray] = None
 
 
+MAX_COMBINATION_BUFFER_BYTES = 256 * 1024 * 1024  # 256MB上限
+
+
+class CombinationGenerator:
+    """メモリ効率の良い組み合わせ列挙器"""
+
+    def __init__(
+        self,
+        num_capacitors: int,
+        min_counts: np.ndarray,
+        max_counts: np.ndarray,
+        min_total: int,
+        max_total: int,
+        progress_desc: str = "組み合わせ生成",
+        total_desc: str = "組み合わせ総数計算",
+    ) -> None:
+        self.num_capacitors = int(num_capacitors)
+        self.min_counts = np.asarray(min_counts, dtype=np.int32)
+        self.max_counts = np.asarray(max_counts, dtype=np.int32)
+        self.min_total = int(min_total)
+        self.max_total = int(max_total)
+        self.progress_desc = progress_desc
+        self.total_desc = total_desc
+        self._total_cache: Optional[int] = None
+
+        valid_lengths = (
+            self.min_counts.size == self.num_capacitors
+            and self.max_counts.size == self.num_capacitors
+        )
+        self.valid = (
+            self.num_capacitors >= 0
+            and valid_lengths
+            and self.min_total <= self.max_total
+        )
+
+        if self.valid and self.num_capacitors > 0:
+            self.suffix_min = np.cumsum(self.min_counts[::-1])[::-1]
+            self.suffix_max = np.cumsum(self.max_counts[::-1])[::-1]
+        else:
+            self.suffix_min = np.zeros(max(self.num_capacitors, 1), dtype=np.int32)
+            self.suffix_max = np.zeros(max(self.num_capacitors, 1), dtype=np.int32)
+
+    def _bounds(self, index: int, accumulated: int) -> Tuple[int, int]:
+        remaining_min = self.suffix_min[index + 1] if (index + 1) < self.num_capacitors else 0
+        remaining_max = self.suffix_max[index + 1] if (index + 1) < self.num_capacitors else 0
+        lower = max(self.min_counts[index], self.min_total - accumulated - remaining_max)
+        upper = min(self.max_counts[index], self.max_total - accumulated - remaining_min)
+        return int(lower), int(upper)
+
+    def total_count(self) -> int:
+        if not self.valid:
+            self._total_cache = 0
+            return 0
+
+        if self._total_cache is not None:
+            return self._total_cache
+
+        if self.num_capacitors == 0:
+            total = int(self.min_total <= 0 <= self.max_total)
+            self._total_cache = total
+            return total
+
+        max_limit = self.max_total
+        dp = [0] * (max_limit + 1)
+        dp[0] = 1
+
+        progress = get_progress_bar(
+            range(self.num_capacitors),
+            desc=self.total_desc,
+            total=self.num_capacitors
+        )
+        progress_update = getattr(progress, "update", None)
+        progress_close = getattr(progress, "close", None)
+
+        try:
+            for idx in range(self.num_capacitors):
+                lower = int(self.min_counts[idx])
+                upper = int(self.max_counts[idx])
+                if lower > upper:
+                    dp = [0] * (max_limit + 1)
+                    break
+
+                next_dp = [0] * (max_limit + 1)
+                for total in range(max_limit + 1):
+                    base = dp[total]
+                    if base == 0:
+                        continue
+                    if lower > max_limit - total:
+                        continue
+                    max_add = min(upper, max_limit - total)
+                    for add in range(lower, max_add + 1):
+                        next_dp[total + add] += base
+                dp = next_dp
+                if progress_update:
+                    progress_update(1)
+        finally:
+            if progress_close:
+                progress_close()
+
+        total = sum(dp[self.min_total:self.max_total + 1]) if dp else 0
+        self._total_cache = total
+        return total
+
+    def iter_chunks(
+        self,
+        chunk_size: int,
+        shuffle: bool = False,
+        buffer_limit: Optional[int] = None,
+        seed: Optional[int] = None,
+    ) -> Iterable[np.ndarray]:
+        chunk_size = max(1, int(chunk_size))
+        total = self.total_count()
+
+        per_combo_bytes = max(self.num_capacitors, 1) * np.dtype(np.int32).itemsize
+        max_buffer_by_mem = max(1, MAX_COMBINATION_BUFFER_BYTES // per_combo_bytes)
+
+        if buffer_limit is None:
+            buffer_limit = chunk_size
+        buffer_limit = max(1, int(buffer_limit))
+        buffer_limit = max(buffer_limit, chunk_size)
+        buffer_limit = min(buffer_limit, max_buffer_by_mem)
+
+        rng = np.random.default_rng(seed) if shuffle else None
+
+        progress = get_progress_bar(
+            range(total),
+            desc=self.progress_desc,
+            total=total
+        )
+        progress_update = getattr(progress, "update", None)
+        progress_close = getattr(progress, "close", None)
+
+        def generator():
+            buffer: List[Tuple[int, ...]] = []
+            current = [0] * self.num_capacitors
+
+            def flush_buffer():
+                nonlocal buffer
+                if not buffer:
+                    return
+                if rng is not None:
+                    rng.shuffle(buffer)
+                while buffer:
+                    chunk = buffer[:chunk_size]
+                    buffer = buffer[chunk_size:]
+                    if chunk:
+                        yield np.asarray(chunk, dtype=np.int32)
+
+            def backtrack(index: int, accumulated: int):
+                if self.num_capacitors == 0:
+                    return
+                if index == self.num_capacitors:
+                    if self.min_total <= accumulated <= self.max_total:
+                        buffer.append(tuple(current))
+                        if progress_update:
+                            progress_update(1)
+                        if len(buffer) >= buffer_limit:
+                            yield from flush_buffer()
+                    return
+
+                lower, upper = self._bounds(index, accumulated)
+                if upper < lower:
+                    return
+
+                for value in range(lower, upper + 1):
+                    current[index] = value
+                    yield from backtrack(index + 1, accumulated + value)
+                current[index] = 0
+
+            try:
+                if self.num_capacitors == 0:
+                    if self.min_total <= 0 <= self.max_total:
+                        arr = np.zeros((1, 0), dtype=np.int32)
+                        if progress_update:
+                            progress_update(1)
+                        yield arr
+                    return
+
+                if total == 0:
+                    return
+
+                yield from backtrack(0, 0)
+                yield from flush_buffer()
+            finally:
+                if progress_close:
+                    progress_close()
+
+        return generator()
+
+
 def generate_count_vectors(
     num_capacitors: int,
     max_total: int,
     min_total: int,
     min_counts: Optional[np.ndarray] = None,
     max_counts: Optional[np.ndarray] = None,
-) -> np.ndarray:
+) -> CombinationGenerator:
     """
-    コンデンサの組み合わせカウントベクトルを生成
+    コンデンサの組み合わせベクトルを生成
 
     Args:
         num_capacitors: コンデンサ種類数
@@ -79,7 +271,13 @@ def generate_count_vectors(
 
     if min_total > max_total:
         logger.warning("最小総数が最大総数を上回っています。組み合わせは生成されません")
-        return np.zeros((0, num_capacitors), dtype=np.int32)
+        return CombinationGenerator(
+            num_capacitors,
+            np.zeros(num_capacitors, dtype=np.int32),
+            np.zeros(num_capacitors, dtype=np.int32),
+            1,
+            0,
+        )
 
     if min_counts is None:
         min_counts = np.zeros(num_capacitors, dtype=np.int32)
@@ -102,79 +300,39 @@ def generate_count_vectors(
 
     if total_min_possible > max_total:
         logger.error("各コンデンサの最小使用数の総和が最大総数を超えています。組み合わせが存在しません")
-        return np.zeros((0, num_capacitors), dtype=np.int32)
+        return CombinationGenerator(
+            num_capacitors,
+            min_counts,
+            max_counts,
+            1,
+            0,
+        )
 
     adjusted_min_total = max(min_total, total_min_possible)
     adjusted_max_total = min(max_total, total_max_possible)
 
     if adjusted_min_total > adjusted_max_total:
         logger.warning("指定された範囲では有効な組み合わせが存在しません")
-        return np.zeros((0, num_capacitors), dtype=np.int32)
+        return CombinationGenerator(
+            num_capacitors,
+            min_counts,
+            max_counts,
+            1,
+            0,
+        )
 
     logger.info(
         f"組み合わせ生成: {num_capacitors}種類, 総数{adjusted_min_total}～{adjusted_max_total}個, "
         f"個別範囲min={min_counts.tolist()}, max={max_counts.tolist()}"
     )
 
-    suffix_min = np.cumsum(min_counts[::-1])[::-1]
-    suffix_max = np.cumsum(max_counts[::-1])[::-1]
-
-    combinations: List[Tuple[int, ...]] = []
-
-    def backtrack(index: int, current: List[int], total: int) -> None:
-        if index == num_capacitors:
-            if adjusted_min_total <= total <= adjusted_max_total:
-                combinations.append(tuple(current))
-            return
-
-        remaining_min = suffix_min[index + 1] if index + 1 < num_capacitors else 0
-        remaining_max = suffix_max[index + 1] if index + 1 < num_capacitors else 0
-
-        lower_bound = max(min_counts[index], adjusted_min_total - total - remaining_max)
-        upper_bound = min(max_counts[index], adjusted_max_total - total - remaining_min)
-
-        if upper_bound < lower_bound:
-            return
-
-        for count in range(int(lower_bound), int(upper_bound) + 1):
-            current.append(count)
-            backtrack(index + 1, current, total + count)
-            current.pop()
-
-    backtrack(0, [], 0)
-
-    count_vectors = np.asarray(combinations, dtype=np.int32)
-    logger.info(f"生成された組み合わせ数: {len(count_vectors)}")
-
-    return count_vectors
-
-
-def shuffle_combinations(count_vectors: np.ndarray, 
-                       buffer_size: int,
-                       seed: int = None) -> np.ndarray:
-    """
-    組み合わせの順番をバッファサイズごとにシャッフル
-    
-    Args:
-        count_vectors: カウントベクトル
-        buffer_size: バッファサイズ
-        seed: 乱数シード
-    
-    Returns:
-        シャッフルされたカウントベクトル
-    """
-    n = len(count_vectors)
-    # NumPyのRNGを使用（CPU側でシャッフル）
-    rng = np.random.default_rng(seed)
-    
-    # バッファサイズごとにシャッフル
-    for i in range(0, n, buffer_size):
-        end = min(i + buffer_size, n)
-        indices = np.arange(i, end)
-        rng.shuffle(indices)
-        count_vectors[i:end] = count_vectors[indices]
-    
-    return count_vectors
+    return CombinationGenerator(
+        num_capacitors,
+        min_counts,
+        max_counts,
+        adjusted_min_total,
+        adjusted_max_total,
+    )
 
 
 def process_chunk(ctx: OptimizationContext, 
@@ -416,6 +574,9 @@ def run_optimization(config: UserConfig,
     
     logger.info(f"コンデンサ順序（容量小→大）: {sorted_cap_names}")
     
+    f_grid_host = transfer_to_device(f_grid, np)
+    target_mask_host = transfer_to_device(target_mask, np)
+
     # 最適化コンテキスト作成
     ctx = OptimizationContext(
         config=config,
@@ -425,8 +586,10 @@ def run_optimization(config: UserConfig,
         dtype_c=dtype_c,
         dtype_r=dtype_r,
         f_grid=f_grid,
+        f_grid_host=f_grid_host,
         eval_mask=eval_mask,
         target_mask=target_mask,
+        target_mask_host=target_mask_host,
         vram_budget=vram_budget,
         chunk_size_limit=chunk_size_limit,
         capacitor_impedances=sorted_cap_impedances,
@@ -461,8 +624,8 @@ def run_optimization(config: UserConfig,
     if gui_callback:
         payload = {
             'type': 'grid_update',
-            'frequency_grid': transfer_to_device(f_grid, np),
-            'target_mask': transfer_to_device(target_mask, np),
+            'frequency_grid': ctx.f_grid_host,
+            'target_mask': ctx.target_mask_host,
         }
         if z_without_decap_np is not None:
             payload['z_without_decap'] = z_without_decap_np
@@ -510,104 +673,120 @@ def run_optimization(config: UserConfig,
     min_total = max(1, int(config.max_total_parts * config.min_total_parts_ratio))
     min_total = max(min_total, int(np.sum(min_counts_arr)))
     
-    with Timer("組み合わせ生成"):
-        count_vectors = generate_count_vectors(
+    with Timer("組み合わせ準備"):
+        combination_space = generate_count_vectors(
             num_capacitors,
             max_total_parts,
             min_total,
             min_counts_arr,
             max_counts_arr,
         )
-    
-    # シャッフル（有効な場合）
-    if config.shuffle_evaluation:
-        count_vectors = shuffle_combinations(
-            count_vectors,
-            int(config.buffer_limit),
-            config.seed
+
+    total_combinations = combination_space.total_count()
+    logger.info(f"組み合わせ総数: {total_combinations}")
+
+    global_top_k: List[Dict] = []
+    processed_combinations = 0
+
+    if total_combinations > 0:
+        # チャンクサイズ決定
+        bytes_per_combination = int(
+            num_capacitors * np.dtype(np.int32).itemsize +
+            len(f_grid) * dtype_c.itemsize +
+            len(f_grid) * dtype_r.itemsize
         )
-    
-    # チャンクサイズ決定
-    bytes_per_combination = int(
-        num_capacitors * np.dtype(np.int32).itemsize +
-        len(f_grid) * dtype_c.itemsize +
-        len(f_grid) * dtype_r.itemsize
-    )
-    bytes_per_combination = max(bytes_per_combination, 1)
-    safety_margin = 1.2
-    effective_limit = int(ctx.chunk_size_limit / safety_margin)
-    raw_chunk = max(1, min(len(count_vectors), effective_limit // bytes_per_combination))
-    chunk_size = max(1, raw_chunk)
-    estimated_mem = chunk_size * bytes_per_combination / (1024 ** 2)
+        bytes_per_combination = max(bytes_per_combination, 1)
+        safety_margin = 1.2
+        effective_limit = max(1, int(ctx.chunk_size_limit / safety_margin))
+        max_chunk_by_mem = max(1, effective_limit // bytes_per_combination)
+        raw_chunk = max(1, min(total_combinations, max_chunk_by_mem))
+        chunk_size = max(1, raw_chunk)
+        estimated_mem = chunk_size * bytes_per_combination / (1024 ** 2)
 
-    logger.info(
-        f"チャンクサイズ: {chunk_size} 組み合わせ/チャンク (推定使用メモリ: {estimated_mem:.2f} MB)"
-    )
-    
-    # 探索ループ
-    num_chunks = (len(count_vectors) + chunk_size - 1) // chunk_size
-    global_top_k = []
-    
-    progress = get_progress_bar(
-        range(num_chunks),
-        desc="探索処理",
-        total=num_chunks
-    )
-    
-    try:
-        with memory_cleanup(xp):
-            for chunk_id in progress:
-                if stop_event and stop_event.is_set():
-                    ctx.stop_flag = True
-                # 停止フラグチェック
-                if ctx.stop_flag:
-                    logger.info("探索を停止しました")
-                    break
+        logger.info(
+            f"チャンクサイズ: {chunk_size} 組み合わせ/チャンク (推定使用メモリ: {estimated_mem:.2f} MB)"
+        )
 
-                # チャンク取得
-                start_idx = chunk_id * chunk_size
-                end_idx = min(start_idx + chunk_size, len(count_vectors))
-                chunk = count_vectors[start_idx:end_idx]
-                
-                # チャンク処理
-                chunk_results = process_chunk(ctx, chunk, chunk_id)
-                if ctx.stop_event and ctx.stop_event.is_set():
-                    ctx.stop_flag = True
+        buffer_limit = None
+        if config.buffer_limit and config.buffer_limit > 0:
+            buffer_limit = int(config.buffer_limit)
 
-                if ctx.stop_flag:
-                    logger.info("停止リクエストを検知したため探索を終了します")
-                    break
+        combination_iterator = combination_space.iter_chunks(
+            chunk_size=chunk_size,
+            shuffle=config.shuffle_evaluation,
+            buffer_limit=buffer_limit,
+            seed=config.seed,
+        )
 
-                # グローバルtop_k更新
-                global_top_k = update_global_top_k(
-                    global_top_k,
-                    chunk_results,
-                    config.top_k
-                )
-                ctx.top_k_results = global_top_k
+        progress = get_progress_bar(
+            range(total_combinations),
+            desc="探索処理",
+            total=total_combinations
+        )
+        progress_update = getattr(progress, "update", None)
+        progress_close = getattr(progress, "close", None)
 
-                # GUI更新コールバック
-                if gui_callback:
-                    gui_callback({
-                        'type': 'top_k_update',
-                        'top_k': global_top_k,
-                        'progress': (chunk_id + 1) / num_chunks,
-                        'capacitor_names': sorted_cap_names,
-                        'frequency_grid': transfer_to_device(f_grid, np),
-                        'target_mask': transfer_to_device(target_mask, np)
-                    })
-                
-                # 進捗ログ
-                # if (chunk_id + 1) % 10 == 0:
-                #     best_score = global_top_k[0]['total_score'] if global_top_k else float('inf')
-                #     logger.info(f"進捗: {(chunk_id + 1) / num_chunks * 100:.1f}%, "
-                #                f"ベストスコア: {best_score:.6f}")
+        try:
+            with memory_cleanup(xp):
+                for chunk_id, count_vectors_chunk in enumerate(combination_iterator):
+                    if stop_event and stop_event.is_set():
+                        ctx.stop_flag = True
+                    if ctx.stop_flag:
+                        logger.info("探索を停止しました")
+                        break
 
-    except KeyboardInterrupt:
-        logger.info("探索が中断されました")
-    except Exception as e:
-        logger.error(f"探索エラー: {e}")
-        traceback.print_exc()
+                    if count_vectors_chunk is None or len(count_vectors_chunk) == 0:
+                        continue
+
+                    # チャンク処理
+                    chunk_results = process_chunk(ctx, count_vectors_chunk, chunk_id)
+                    if ctx.stop_event and ctx.stop_event.is_set():
+                        ctx.stop_flag = True
+
+                    if ctx.stop_flag:
+                        logger.info("停止リクエストを検知したため探索を終了します")
+                        break
+
+                    # グローバルtop_k更新
+                    global_top_k = update_global_top_k(
+                        global_top_k,
+                        chunk_results,
+                        config.top_k
+                    )
+                    ctx.top_k_results = global_top_k
+
+                    processed_combinations += int(chunk_results.get('num_processed', len(count_vectors_chunk)))
+                    if progress_update:
+                        progress_update(int(chunk_results.get('num_processed', len(count_vectors_chunk))))
+
+                    progress_ratio = min(
+                        processed_combinations / max(total_combinations, 1),
+                        1.0
+                    )
+
+                    # GUI更新コールバック
+                    if gui_callback:
+                        gui_callback({
+                            'type': 'top_k_update',
+                            'top_k': global_top_k,
+                            'progress': progress_ratio,
+                            'capacitor_names': sorted_cap_names,
+                            'frequency_grid': ctx.f_grid_host,
+                            'target_mask': ctx.target_mask_host
+                        })
+        except KeyboardInterrupt:
+            logger.info("探索が中断されました")
+        except Exception as e:
+            logger.error(f"探索エラー: {e}")
+            traceback.print_exc()
+        finally:
+            if progress_close:
+                progress_close()
+    else:
+        logger.warning("有効な組み合わせが存在しないため探索をスキップします")
+        ctx.top_k_results = []
+
+    ctx.top_k_results = global_top_k
 
     host_cap_impedances = {
         name: transfer_to_device(z, np)
@@ -627,8 +806,8 @@ def run_optimization(config: UserConfig,
     results = {
         'top_k_results': global_top_k,
         'capacitor_names': sorted_cap_names,
-        'frequency_grid': transfer_to_device(f_grid, np),
-        'target_mask': transfer_to_device(target_mask, np),
+        'frequency_grid': ctx.f_grid_host,
+        'target_mask': ctx.target_mask_host,
         'z_pdn_without_decap': ctx.z_without_decap,
         'config': config,
         'backend': backend_name,

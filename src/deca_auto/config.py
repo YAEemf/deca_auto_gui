@@ -13,10 +13,10 @@ class CapacitorConfig:
     """コンデンサ設定"""
     name: str
     path: Optional[str] = ""    # SPICEモデルパス
-    C: Optional[float] = 0      # 容量値 [F]
-    ESR: float = 10e-3          # 等価直列抵抗 [Ω]
-    ESL: float = 0.5e-9         # 等価直列インダクタンス [H]
-    L_mnt: Optional[float] = 0.5e-9  # マウントインダクタンス [H]
+    C: Optional[float] = 0.0      # 容量値 [F]
+    ESR: float = 15e-3          # 等価直列抵抗 [Ω]
+    ESL: float = 2e-10         # 等価直列インダクタンス [H]
+    L_mnt: Optional[float] = 0.2e-10  # マウントインダクタンス [H]
     MIN: Optional[int] = None   # 最小使用数
     MAX: Optional[int] = None   # 最大使用数
 
@@ -28,7 +28,7 @@ class UserConfig:
     # 周波数グリッド設定
     f_start: float = 1e2  # 開始周波数 [Hz]
     f_stop: float = 1e9  # 終了周波数 [Hz]
-    num_points_per_decade: int = 256  # DECADEごとの点数
+    num_points_per_decade: int = 128  # DECADEごとの点数
     
     # 評価帯域
     f_L: float = 1e3  # 下限周波数 [Hz]
@@ -36,14 +36,13 @@ class UserConfig:
     
     # 目標マスク
     target_impedance_mode: str = "custom"  # モード: "flat", "auto", "custom"
-    z_target: float = 10e-3  # フラット目標インピーダンス [Ω]
+    z_target: float = 10e-3  # 目標インピーダンス(フラット) [Ω]　 ΔV/ΔI=10e-3Ω
     z_custom_mask: Optional[List[Tuple[float, float]]] = field(
         default_factory=lambda: [
-            (1e3, 10e-3),
-            (5e3, 10e-3),
-            (2e4, 8e-3),
-            (2e6, 8e-3),
-            (1e8, 0.45),
+            (1e3, 8e-3),
+            (1e6, 8e-3),
+            (1e7, 2e-2),
+            (1e8, 0.20),
         ]
     )  # カスタムマスク [(freq, impedance), ...]
 
@@ -51,59 +50,59 @@ class UserConfig:
     v_supply: float = 3.3  # 電源電圧 [V]
     ripple_ratio: Optional[float] = 5.0  # 許容リップル率 [%]
     ripple_voltage: Optional[float] = None  # 許容リップル電圧 [V] (ripple_ratioと排他)
-    i_max: float = 5.0  # 最大消費電流 [A]
+    i_max: float = 5.0  # 最大供給電流 [A]
     switching_activity: Optional[float] = 0.5  # 電流変動率 (0-1)
     i_transient: Optional[float] = None  # 過渡電流 [A] (switching_activityと排他)
-    design_margin: float = 20.0  # デザインマージン [%]
+    design_margin: float = 15.0  # デザインマージン [%]
     
     # PDN寄生成分
     R_vrm: float = 15e-3    # VRM ESR [Ω]
-    L_vrm: float = 10e-9    # VRM ESL [H]
+    L_vrm: float = 5e-9     # VRM ESL [H]
     R_sN: float = 0.5e-3    # spreading抵抗（デカップリングコンデンサ用）[Ω]
-    L_sN: float = 0.5e-9    # spreadingインダクタンス（デカップリングコンデンサ用）[H]
-    L_mntN: float = 0.5e-9  # マウントインダクタンス [H]
+    L_sN: float = 0.4e-9    # spreadingインダクタンス（デカップリングコンデンサ用）[H]
+    L_mntN: float = 0.2e-10 # マウントインダクタンス [H]
     R_s: float = 0.2e-3     # spreading抵抗（VCC直前）[Ω]
     L_s: float = 0.25e-9    # spreadingインダクタンス（VCC直前）[H]
-    R_v: float = 0.2e-3     # via抵抗 [Ω]
+    R_v: float = 1e-3       # via抵抗 [Ω]
     L_v: float = 0.5e-9     # viaインダクタンス [H]
     R_p: float = 20e-3      # プレーナ抵抗 [Ω]
-    C_p: float = 25e-12     # プレーナ容量 [F]
+    C_p: float = 2.5e-11     # プレーナ容量 [F]
     tan_delta_p: float = 0.02  # 誘電正接
     
     # SPICEシミュレーション
-    dc_bias: float = 5.0  # DCバイアス電圧 [V]
+    dc_bias: float = v_supply  # DCバイアス電圧 [V]
     model_path: str = "model"  # SPICEモデルディレクトリ
     
     # コンデンサリスト
     capacitors: List[Dict[str, Any]] = field(default_factory=lambda: [
-        {"name": "C_0603_0.1u", "C": 0.1e-6, "ESR": 10e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_0.22u", "C": 0.22e-6, "ESR": 10e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_0.33u", "C": 0.33e-6, "ESR": 10e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_0.47u", "C": 0.47e-6, "ESR": 10e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_1u", "C": 1e-6, "ESR": 10e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_2.2u", "C": 2.2e-6, "ESR": 10e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_3.3u", "C": 3.3e-6, "ESR": 10e-3, "ESL": 0.5e-9},
-        {"name": "C_0603_4.7u", "C": 4.7e-6, "ESR": 10e-3, "ESL": 0.5e-9},
-        {"name": "C_1608_10u", "C": 10e-6, "ESR": 10e-3, "ESL": 0.8e-9},
-        {"name": "C_2012_22u", "C": 22e-6, "ESR": 10e-3, "ESL": 1.0e-9},
-        {"name": "C_2012_33u", "C": 33e-6, "ESR": 10e-3, "ESL": 1.0e-9},
-        {"name": "C_2012_47u", "C": 47e-6, "ESR": 10e-3, "ESL": 1.0e-9},
+        {"name": "C_0603_0.1u", "C": 0.1e-6, "ESR": 15e-3, "ESL": 2e-10},
+        {"name": "C_0603_0.22u", "C": 0.22e-6, "ESR": 15e-3, "ESL": 2e-10},
+        {"name": "C_0603_0.33u", "C": 0.33e-6, "ESR": 15e-3, "ESL": 2e-10},
+        {"name": "C_0603_0.47u", "C": 0.47e-6, "ESR": 15e-3, "ESL": 2e-10},
+        {"name": "C_0603_1u", "C": 1e-6, "ESR": 12e-3, "ESL": 2e-10},
+        {"name": "C_0603_2.2u", "C": 2.2e-6, "ESR": 12e-3, "ESL": 2e-10},
+        {"name": "C_0603_3.3u", "C": 3.3e-6, "ESR": 12e-3, "ESL": 2e-10},
+        {"name": "C_0603_4.7u", "C": 4.7e-6, "ESR": 12e-3, "ESL": 2e-10},
+        {"name": "C_1608_10u", "C": 10e-6, "ESR": 10e-3, "ESL": 3e-10},
+        {"name": "C_2012_22u", "C": 22e-6, "ESR": 10e-3, "ESL": 5e-10},
+        {"name": "C_2012_33u", "C": 33e-6, "ESR": 10e-3, "ESL": 5e-10},
+        {"name": "C_2012_47u", "C": 47e-6, "ESR": 10e-3, "ESL": 5e-10},
         {"name": "C_Poly_100u", "C": 100e-6, "ESR": 100e-3, "ESL": 1.5e-9},
     ])
     
     # 探索設定
     max_total_parts: int = 10  # コンデンサ総数上限
-    min_total_parts_ratio: float = 0.60  # 最小総数比率
+    min_total_parts_ratio: float = 0.6  # 最小総数比率
     top_k: int = 15  # 上位候補数
     shuffle_evaluation: bool = True  # 評価順のシャッフル
-    buffer_limit: float = 80e6  # バッファサイズ上限
+    buffer_limit: float = 100e6  # バッファサイズ上限
     
     # スコア重み
-    weight_max: float = 0.2
+    weight_max: float = 0.3
     weight_area: float = 1.0
-    weight_mean: float = 0.4
+    weight_mean: float = 0.2
     weight_anti: float = 0.3
-    weight_flat: float = 0.1
+    weight_flat: float = 0.0
     weight_under: float = 0.1
     weight_parts: float = 0.1
     weight_num_types: float = 0.1

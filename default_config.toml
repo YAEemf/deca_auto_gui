@@ -1,8 +1,8 @@
 [frequency]
 # 周波数グリッド設定
 f_start = 1e2   # 開始周波数 [Hz]
-f_stop = 5e8    # 終了周波数 [Hz]
-num_points_per_decade = 256 # Decade毎の計算ポイント数
+f_stop = 1e9    # 終了周波数 [Hz]
+num_points_per_decade = 128 # Decade毎の計算ポイント数
 
 # 評価帯域
 f_L = 1e3   # 下限周波数 [Hz]
@@ -21,40 +21,39 @@ z_target = 10e-3
 # カスタムマスク（任意）[(freq, impedance), ...]
 # もしマスクの方が評価帯域より広ければマスクの帯域が優先される
 z_custom_mask = [
-    [1e3, 10e-3],
-    [5e3, 10e-3],
-    [2e4, 8e-3],
-    [2e6, 8e-3],
-    [1e8, 0.45],
+    [1e3, 8e-3],
+    [1e6, 8e-3],
+    [1e7, 2e-2],
+    [1e8, 0.20],
 ]
 
 # 自動計算モード用パラメーター
 v_supply = 3.3              # 電源電圧 [V]
 ripple_ratio = 5.0          # 許容リップル率 [%]（ripple_voltageと排他）
 # ripple_voltage = 50e-3    # 許容リップル電圧 [V]（ripple_ratioと排他）
-i_max = 10.0                # 最大消費電流 [A]
+i_max = 5.0                # 最大消費電流 [A]
 switching_activity = 0.5    # 電流変動率 (0-1)（i_transientと排他）
 # i_transient = 5.0         # 過渡電流 [A]（switching_activityと排他）
-design_margin = 20.0        # デザインマージン [%]
+design_margin = 15.0        # デザインマージン [%]
 
 [pdn_parasitic]
 # PDN寄生成分
-R_vrm = 0.015   # VRM ESR [Ω]
-L_vrm = 1e-08   # VRM ESL [H]
-R_sN = 0.0005   # spreading抵抗（デカップリングコンデンサ用）[Ω]
-L_sN = 5e-10    # spreadingインダクタンス（デカップリングコンデンサ用）[H]
-L_mntN = 5e-10  # マウントインダクタンス [H]
-R_s = 0.0002    # spreading抵抗（VCC直前）[Ω]
-L_s = 2.5e-10   # spreadingインダクタンス（VCC直前）[H]
-R_v = 0.0002    # via抵抗 [Ω]
+R_vrm = 15e-3   # VRM ESR [Ω]
+L_vrm = 5e-9   # VRM ESL [H]
+R_sN = 0.5e-3   # spreading抵抗（デカップリングコンデンサ用）[Ω]
+L_sN = 4e-10    # spreadingインダクタンス（デカップリングコンデンサ用）[H]
+L_mntN = 0.2e-10  # マウントインダクタンス [H]
+R_s = 0.2e-3    # spreading抵抗（VCC直前）[Ω]
+L_s = 0.25e-9   # spreadingインダクタンス（VCC直前）[H]
+R_v = 1e-3    # via抵抗 [Ω]
 L_v = 5e-10     # viaインダクタンス [H]
-R_p = 0.015     # プレーナ抵抗 [Ω]
+R_p = 20e-3     # プレーナ抵抗 [Ω]
 C_p = 2.5e-11   # プレーナ容量 [F]
 tan_delta_p = 0.02  # 基板の誘電正接
 
 [spice]
 # SPICEシミュレーション
-dc_bias = 5.0       # DCバイアス電圧 [V]
+dc_bias = 3.3       # DCバイアス電圧 [V]
 model_path = "model"    # SPICEモデルディレクトリ
 
 [search]
@@ -63,17 +62,17 @@ max_total_parts = 10    # コンデンサ総数上限
 min_total_parts_ratio = 0.6     # 最小総数比率（これより少ない総数の組み合わせは探索から除外）
 top_k = 15  # 保持する上位候補数
 shuffle_evaluation = true   # 評価順のシャッフル（色々な組み合わせが現れるのでグラフを見てて楽しい。特に何かの役には立たない）
-buffer_limit = 80e6   # バッファサイズ上限
+buffer_limit = 100e6   # バッファサイズ上限
 
 [weights]
 # スコア重み（ある重みを大きくすると、その特性に優れた候補が現れやすくなる）
-weight_max = 0.2        # 最大値（評価帯域内での最大値）
+weight_max = 0.3        # 最大値（評価帯域内での最大値）
 weight_area = 1.0       # 目標マスクに対する超過面積
 weight_under = 0.1      # 目標マスクに対する不足面積
-weight_mean = 0.3       # 平均値
-weight_anti = 0.2       # アンチレゾナンス（反共振によるピーク）
+weight_mean = 0.2       # 平均値
+weight_anti = 0.3       # アンチレゾナンス（反共振によるピーク）
 weight_resonance = 0.1  # レゾナンス（共振による急峻な谷）
-weight_flat = 0.1       # 平滑さ
+weight_flat = 0.0       # 平滑さ
 weight_parts = 0.1      # 部品点数
 weight_num_types = 0.1  # 組み合わせにおける部品の種類数
 weight_mc_worst = 1.0   # Monte Carlo最悪値（部品特性のバラつきを考慮。常に1.0で良いかと）
@@ -114,8 +113,8 @@ excel_name = "dcap_result"
 name = "C_0603_0.1u"
 C = 0.1e-6
 ESR = 15e-3
-ESL = 0.5e-9
-L_mnt = 0.5e-9  # マウントインダクタンス
+ESL = 2e-10
+L_mnt = 0.2e-10
 
 # SPICEモデルを使用する場合の例
 # [[capacitors]]

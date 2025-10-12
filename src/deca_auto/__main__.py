@@ -71,7 +71,7 @@ def launch_streamlit(config_files: List[str] = None, no_search: bool = False):
         env["DECA_LOG_LEVEL"] = str(logger.level)
 
         # Streamlit起動
-        logger.info(f"Streamlitを起動しています... (http://localhost:{port})")
+        logger.info(f"起動しています... (http://localhost:{port})")
         subprocess.run(cmd, env=env)
         
     except KeyboardInterrupt:
