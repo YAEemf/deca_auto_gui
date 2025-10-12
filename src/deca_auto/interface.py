@@ -115,6 +115,21 @@ def parse_usage_range_input(text: str, max_total: int) -> Tuple[Optional[int], O
 
     return min_val, max_val
 
+
+def apply_cli_overrides(config: UserConfig) -> None:
+    """CLIから渡された環境変数を反映"""
+    env_force = os.environ.get("DECA_FORCE_NUMPY")
+    if env_force is not None:
+        normalized = env_force.strip().lower()
+        config.force_numpy = normalized in ("1", "true", "yes", "on")
+
+    env_cuda = os.environ.get("DECA_CUDA_DEVICE")
+    if env_cuda is not None:
+        try:
+            config.cuda = int(env_cuda)
+        except ValueError:
+            logger.warning(f"無効なCUDAデバイス指定を無視します: {env_cuda}")
+
 # Streamlit設定
 st.set_page_config(
     page_title="PDN Impedance Optimization Tool",
@@ -133,6 +148,7 @@ def initialize_session_state():
             st.session_state.config = load_config(config_files[0])
         else:
             st.session_state.config = UserConfig()
+        apply_cli_overrides(st.session_state.config)
     
     if 'optimization_running' not in st.session_state:
         st.session_state.optimization_running = False
@@ -248,7 +264,7 @@ def create_sidebar():
             get_localized_text('load_config', config),
             type=['toml'],
             help=get_localized_text('drop_config', config),
-            key="config_file_uploader"  # 固定キーに変更
+            key="config_file_uploader"  # 固定キー
         )
         
         if uploaded_file is not None:
@@ -263,6 +279,7 @@ def create_sidebar():
 
                     # 設定読み込み
                     new_config = load_config(temp_path, verbose=False)
+                    apply_cli_overrides(new_config)
                     st.session_state.config = new_config
                     st.success("設定ファイルを読み込みました")
                     

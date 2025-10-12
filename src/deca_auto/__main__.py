@@ -34,7 +34,12 @@ def find_available_port(start_port: int, max_attempts: int = 10) -> int:
     raise RuntimeError(f"利用可能なポートが見つかりません (試行: {start_port}-{start_port+max_attempts-1})")
 
 
-def launch_streamlit(config_files: List[str] = None, no_search: bool = False):
+def launch_streamlit(
+    config_files: List[str] = None,
+    no_search: bool = False,
+    force_numpy_override: Optional[bool] = None,
+    cuda_override: Optional[int] = None,
+):
     """StreamlitのGUIを起動"""
     try:
         # インターフェースモジュールのパスを取得
@@ -67,6 +72,10 @@ def launch_streamlit(config_files: List[str] = None, no_search: bool = False):
             env["DECA_CONFIG_FILES"] = ",".join(config_files)
         if no_search:
             env["DECA_NO_SEARCH"] = "1"
+        if force_numpy_override is not None:
+            env["DECA_FORCE_NUMPY"] = "1" if force_numpy_override else "0"
+        if cuda_override is not None:
+            env["DECA_CUDA_DEVICE"] = str(cuda_override)
         # ログレベルを環境変数で渡す
         env["DECA_LOG_LEVEL"] = str(logger.level)
 
@@ -176,7 +185,9 @@ def main():
         # GUI起動
         launch_streamlit(
             config_files=args.config,
-            no_search=args.no_search
+            no_search=args.no_search,
+            force_numpy_override=configs[0].force_numpy if configs else None,
+            cuda_override=configs[0].cuda if configs else None,
         )
     else:
         # CLIモード
