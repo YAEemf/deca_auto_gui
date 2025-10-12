@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 
 from deca_auto.config import UserConfig
-from deca_auto.utils import logger, transfer_to_device, safe_divide
+from deca_auto.utils import logger, transfer_to_host, safe_divide
 from deca_auto.pdn import calculate_pdn_impedance_monte_carlo, prepare_pdn_components
 
 
@@ -15,6 +15,7 @@ def calculate_score_components_batch(
     config: UserConfig,
     xp: Any = np,
     f_grid: Optional[Any] = None,
+    eval_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """バッチ処理版スコアコンポーネント計算"""
 
@@ -29,12 +30,32 @@ def calculate_score_components_batch(
     if z_pdn_batch.shape[0] != count_vectors.shape[0]:
         raise ValueError("z_pdn_batch と count_vectors のバッチ次元が一致しません")
 
-    eval_mask = xp.asarray(eval_mask, dtype=bool)
+    metadata = eval_metadata or {}
+    freq_indices = metadata.get('indices')
+    df_log = metadata.get('df_log')
+    n_eval = int(metadata.get('n_eval', 0)) if freq_indices is not None else -1
+
+    if freq_indices is not None:
+        freq_indices = xp.asarray(freq_indices, dtype=getattr(xp, "int64", np.int64))
+        n_eval = int(n_eval if n_eval >= 0 else freq_indices.shape[0])
+        if df_log is not None:
+            df_log = xp.asarray(df_log)
+    else:
+        eval_mask = xp.asarray(eval_mask, dtype=bool)
+        freq_indices = xp.where(eval_mask)[0]
+        n_eval = int(freq_indices.size)
+        df_log = None
+
     target_curve = xp.asarray(target_curve)
     float_dtype = z_pdn_batch.real.dtype
 
-    freq_indices = xp.where(eval_mask)[0]
-    n_eval = freq_indices.size
+    if df_log is None and n_eval >= 2:
+        if f_grid is None:
+            f_eval = xp.arange(n_eval, dtype=float_dtype) + 1.0
+        else:
+            f_eval = xp.asarray(f_grid)[freq_indices].astype(float_dtype, copy=False)
+        df_log = xp.log10(f_eval[1:] / f_eval[:-1])
+        df_log = xp.where(xp.isfinite(df_log) & (df_log > 0), df_log, 0.0)
 
     total_parts = count_vectors.sum(axis=1)
     score_parts = safe_divide(
@@ -63,19 +84,12 @@ def calculate_score_components_batch(
     ratio = z_eval / t_eval
     ratio_clipped = xp.maximum(ratio, 1e-12)
 
-    if f_grid is None:
-        f_eval = xp.arange(n_eval, dtype=float) + 1.0
-    else:
-        f_eval = xp.asarray(f_grid)[freq_indices].astype(float)
-
     score_max = xp.minimum(ratio_clipped.max(axis=1), 50.0)
     score_mean_raw = ratio_clipped.mean(axis=1)
     score_mean = xp.minimum(score_mean_raw, 50.0)
 
     excess = xp.maximum(ratio_clipped - 1.0, 0.0)
     if n_eval >= 2:
-        df_log = xp.log10(f_eval[1:] / f_eval[:-1])
-        df_log = xp.where(xp.isfinite(df_log) & (df_log > 0), df_log, 0.0)
         traps = 0.5 * (excess[:, :-1] + excess[:, 1:]) * df_log
         score_area = traps.sum(axis=1)
         under_ratio = xp.maximum(1.0 - ratio_clipped, 0.0)
@@ -156,6 +170,7 @@ def calculate_score_components(
     config: UserConfig,
     xp: Any = np,
     f_grid: Optional[np.ndarray] = None,
+    eval_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, float]:
     """単一組み合わせのスコアコンポーネント"""
 
@@ -167,10 +182,11 @@ def calculate_score_components(
         config,
         xp,
         f_grid,
+        eval_metadata=eval_metadata,
     )
 
     return {
-        key: float(transfer_to_device(val, np)[0])
+        key: float(transfer_to_host(val)[0])
         for key, val in batch.items()
     }
 
@@ -183,6 +199,7 @@ def evaluate_combinations(
     config: UserConfig,
     xp: Any = np,
     f_grid: Optional[np.ndarray] = None,
+    eval_metadata: Optional[Dict[str, Any]] = None,
 ) -> np.ndarray:
     """
     バッチ評価（小さいほど良い）。
@@ -195,6 +212,7 @@ def evaluate_combinations(
         config,
         xp,
         f_grid,
+        eval_metadata=eval_metadata,
     )
 
     total = (
@@ -247,7 +265,7 @@ def extract_top_k(z_pdn_batch: np.ndarray,
     else:
         # CuPyの場合（フルソート使用）。以降の処理はCPU側で実施
         sorted_indices = xp.argsort(scores)[:k]
-        indices = transfer_to_device(sorted_indices, np)
+        indices = transfer_to_host(sorted_indices)
 
     indices = np.asarray(indices, dtype=np.int64)
     
@@ -256,7 +274,7 @@ def extract_top_k(z_pdn_batch: np.ndarray,
     for rank, idx in enumerate(indices, start=1):
         idx_int = int(idx)
         if hasattr(scores, '__cuda_array_interface__'):
-            score_value = transfer_to_device(scores[idx_int], np)
+            score_value = transfer_to_host(scores[idx_int])
         else:
             score_value = scores[idx_int]
 
@@ -284,7 +302,8 @@ def monte_carlo_evaluation(top_k_results: List[Dict],
                           target_mask: np.ndarray,
                           config: UserConfig,
                           xp: Any = np,
-                          pdn_assets: Optional[Dict[str, Any]] = None) -> np.ndarray:
+                          pdn_assets: Optional[Dict[str, Any]] = None,
+                          eval_metadata: Optional[Dict[str, Any]] = None) -> np.ndarray:
     """
     Monte Carlo法でロバスト性を評価
     
@@ -344,16 +363,17 @@ def monte_carlo_evaluation(top_k_results: List[Dict],
             config,
             xp,
             f_grid,
+            eval_metadata=eval_metadata,
         )
 
         # 最悪値（最大スコア）を記録
-        worst_score_val = transfer_to_device(xp.max(mc_scores), np)
+        worst_score_val = transfer_to_host(xp.max(mc_scores))
         worst_score = float(np.asarray(worst_score_val).item() if not np.isscalar(worst_score_val) else worst_score_val)
         mc_worst_scores.append(worst_score)
         
         # 統計情報をログ
-        mean_val = transfer_to_device(xp.mean(mc_scores), np)
-        std_val = transfer_to_device(xp.std(mc_scores), np)
+        mean_val = transfer_to_host(xp.mean(mc_scores))
+        std_val = transfer_to_host(xp.std(mc_scores))
         mean_float = float(np.asarray(mean_val).item() if not np.isscalar(mean_val) else mean_val)
         std_float = float(np.asarray(std_val).item() if not np.isscalar(std_val) else std_val)
         logger.debug(f"MC評価 - 平均: {mean_float:.6f}, 最悪: {worst_score:.6f}, std: {std_float:.6f}")
@@ -429,7 +449,7 @@ def summarize_results(top_k_results: List[Dict],
         
         # CPU変換（必要な場合）
         if hasattr(count_vector, '__cuda_array_interface__'):
-            count_vector = transfer_to_device(count_vector, np)
+            count_vector = transfer_to_host(count_vector)
         
         summary = {
             'rank': result['rank'],
@@ -469,8 +489,8 @@ def compare_combinations(combo1: Dict, combo2: Dict,
         return False
     
     # CPU変換
-    cv1 = transfer_to_device(cv1, np)
-    cv2 = transfer_to_device(cv2, np)
+    cv1 = transfer_to_host(cv1)
+    cv2 = transfer_to_host(cv2)
     
     # 配列比較
     if cv1.shape != cv2.shape:

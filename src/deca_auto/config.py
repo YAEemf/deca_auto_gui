@@ -5,7 +5,7 @@ import traceback
 from dataclasses import dataclass, field, asdict
 import numpy as np
 
-from deca_auto.utils import unwrap_toml_value, to_float, to_int, parse_scientific_notation
+from deca_auto.utils import unwrap_toml_value, to_float, to_int, parse_scientific_notation, logger
 
 
 def _derive_name_from_path(path_value: Any) -> Optional[str]:
@@ -582,10 +582,58 @@ def validate_config(config: UserConfig) -> bool:
     except AssertionError as e:
         print(f"設定検証エラー: {e}")
         return False
-    except Exception as e:
-        print(f"設定検証で予期しないエラー: {e}")
-        traceback.print_exc()
-        return False
+
+
+def resolve_capacitor_usage_bounds(config: UserConfig,
+                                   ordered_names: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    ソート済みコンデンサ名に対するMIN/MAX制約を配列で返す
+
+    Args:
+        config: ユーザー設定
+        ordered_names: 容量小→大で整列済みのコンデンサ名
+
+    Returns:
+        (min_counts, max_counts): 各コンデンサの最小/最大数
+    """
+    max_total_parts = max(0, int(config.max_total_parts))
+    min_counts: List[int] = []
+    max_counts: List[int] = []
+
+    for name in ordered_names:
+        cap_cfg = next((c for c in config.capacitors if c.get('name') == name), {})
+        raw_min = cap_cfg.get('MIN') if cap_cfg else None
+        raw_max = cap_cfg.get('MAX') if cap_cfg else None
+
+        min_count = to_int(raw_min, 0) if raw_min is not None else 0
+        max_default = max_total_parts if max_total_parts > 0 else 0
+        max_count = to_int(raw_max, max_default) if raw_max is not None else max_default
+
+        if min_count is None:
+            min_count = 0
+        if max_count is None:
+            max_count = max_default
+
+        if min_count < 0:
+            logger.info(f"コンデンサ {name} の最小使用数 {min_count} を0に切り上げます")
+            min_count = 0
+
+        if max_count < 0:
+            logger.info(f"コンデンサ {name} の最大使用数 {max_count} を max_total_parts ({max_default}) に合わせます")
+            max_count = max_default
+
+        if max_total_parts > 0 and max_count > max_total_parts:
+            logger.info(f"コンデンサ {name} の最大使用数 {max_count} を max_total_parts ({max_total_parts}) に合わせます")
+            max_count = max_total_parts
+
+        if max_count < min_count:
+            logger.info(f"コンデンサ {name} の最大使用数 {max_count} が最小使用数 {min_count} より小さいため調整します")
+            max_count = min_count
+
+        min_counts.append(int(min_count))
+        max_counts.append(int(max_count))
+
+    return np.asarray(min_counts, dtype=np.int32), np.asarray(max_counts, dtype=np.int32)
 
 
 def get_localized_text(key: str, config: UserConfig) -> str:

@@ -6,7 +6,7 @@ import numpy as np
 
 from deca_auto.config import UserConfig
 from deca_auto.utils import (
-    logger, Timer, get_progress_bar, transfer_to_device,
+    logger, Timer, get_progress_bar, transfer_to_device, transfer_to_host,
     log_interpolate, validate_result, ensure_numpy, to_float
 )
 
@@ -545,9 +545,9 @@ def calculate_all_capacitor_impedances(config: UserConfig, f_grid: np.ndarray,
             gui_callback({
                 'type': 'capacitor_update',
                 'name': name,
-                'z_c': transfer_to_device(z_c, np),
+                'z_c': transfer_to_host(z_c),
                 'capacitance': capacitance,
-                'frequency': transfer_to_device(f_grid, np)
+                'frequency': transfer_to_host(f_grid)
             })
     
     logger.info(f"各コンデンサZ_c計算完了：{len(capacitor_impedances)}種類")

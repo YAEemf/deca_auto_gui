@@ -5,14 +5,17 @@ import traceback
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any, Callable, Iterable
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from deca_auto.config import UserConfig, validate_config
+from deca_auto.config import UserConfig, validate_config, resolve_capacitor_usage_bounds
 from deca_auto.utils import (
     logger, get_backend, get_gpu_info, get_vram_budget,
     generate_frequency_grid, create_evaluation_mask, create_target_mask,
     Timer, memory_cleanup, get_progress_bar, transfer_to_device,
-    get_dtype, ensure_numpy, to_float, get_custom_mask_freq_range,
+    transfer_to_host, get_dtype, ensure_numpy, to_float,
+    get_custom_mask_freq_range,
+    profile_block, increment_metric, update_metric_max, get_memory_snapshot,
+    log_metrics,
 )
 from deca_auto.capacitor import (
     calculate_all_capacitor_impedances,
@@ -50,6 +53,8 @@ class OptimizationContext:
     capacitor_indices: np.ndarray
     pdn_assets: Dict[str, Any]
     top_k_results: List[Dict]
+    eval_metadata: Dict[str, Any] = field(default_factory=dict)
+    metrics: Dict[str, Any] = field(default_factory=dict)
     stop_flag: bool = False
     gui_callback: Optional[Callable] = None
     stop_event: Optional[Any] = None
@@ -189,31 +194,38 @@ class CombinationGenerator:
         progress_close = getattr(progress, "close", None)
 
         def generator():
-            buffer: List[Tuple[int, ...]] = []
-            current = [0] * self.num_capacitors
+            buffer_width = self.num_capacitors
+            buffer_array = np.zeros((buffer_limit, buffer_width), dtype=np.int32)
+            buffer_size = 0
+            current = np.zeros(buffer_width, dtype=np.int32)
 
             def flush_buffer():
-                nonlocal buffer
-                if not buffer:
+                nonlocal buffer_size
+                if buffer_size == 0:
                     return
+                view = buffer_array[:buffer_size].copy()
                 if rng is not None:
-                    rng.shuffle(buffer)
-                while buffer:
-                    chunk = buffer[:chunk_size]
-                    buffer = buffer[chunk_size:]
-                    if chunk:
-                        yield np.asarray(chunk, dtype=np.int32)
+                    rng.shuffle(view, axis=0)
+                total_rows = view.shape[0]
+                start = 0
+                while start < total_rows:
+                    end = min(start + chunk_size, total_rows)
+                    yield view[start:end]
+                    start = end
+                buffer_size = 0
 
             def backtrack(index: int, accumulated: int):
+                nonlocal buffer_size
                 if self.num_capacitors == 0:
                     return
                 if index == self.num_capacitors:
                     if self.min_total <= accumulated <= self.max_total:
-                        buffer.append(tuple(current))
                         if progress_update:
                             progress_update(1)
-                        if len(buffer) >= buffer_limit:
+                        if buffer_size >= buffer_limit:
                             yield from flush_buffer()
+                        buffer_array[buffer_size, :buffer_width] = current
+                        buffer_size += 1
                     return
 
                 lower, upper = self._bounds(index, accumulated)
@@ -360,72 +372,89 @@ def process_chunk(ctx: OptimizationContext,
         count_vectors_gpu = transfer_to_device(count_vectors_chunk, xp)
     else:
         count_vectors_gpu = count_vectors_chunk
-    
+
+    increment_metric(ctx.metrics, "chunk_received", 1)
+    update_metric_max(ctx.metrics, "chunk_size_max", len(count_vectors_chunk))
+    increment_metric(ctx.metrics, "combinations_received", len(count_vectors_chunk))
+
     # PDNインピーダンス計算（バッチ処理）
-    z_pdn_batch = calculate_pdn_impedance_batch(
-        count_vectors_gpu,
-        ctx.capacitor_impedances,
-        ctx.capacitor_indices,
-        ctx.f_grid,
-        ctx.config,
-        xp,
-        prepared=ctx.pdn_assets,
-    )
-
-    if ctx.stop_event and ctx.stop_event.is_set():
-        ctx.stop_flag = True
-        return {'chunk_id': chunk_id, 'top_k': [], 'num_processed': len(count_vectors_chunk)}
-    
-    # スコア評価
-    scores = evaluate_combinations(
-        z_pdn_batch,
-        ctx.target_mask,
-        ctx.eval_mask,
-        count_vectors_gpu,
-        ctx.config,
-        xp,
-        ctx.f_grid,
-    )
-
-    if ctx.stop_event and ctx.stop_event.is_set():
-        ctx.stop_flag = True
-        return {'chunk_id': chunk_id, 'top_k': [], 'num_processed': len(count_vectors_chunk)}
-    
-    # チャンク内のtop_k抽出
-    chunk_top_k = extract_top_k(
-        z_pdn_batch,
-        scores,
-        count_vectors_gpu,
-        ctx.config.top_k,
-        xp
-    )
-    
-    # Monte Carlo評価（有効な場合）
-    if ctx.config.mc_enable and len(chunk_top_k) > 0:
-        mc_scores = monte_carlo_evaluation(
-            chunk_top_k,
+    with profile_block(ctx.metrics, "pdn_impedance_batch"):
+        z_pdn_batch = calculate_pdn_impedance_batch(
+            count_vectors_gpu,
             ctx.capacitor_impedances,
             ctx.capacitor_indices,
             ctx.f_grid,
-            ctx.eval_mask,
+            ctx.config,
+            xp,
+            prepared=ctx.pdn_assets,
+        )
+
+    if ctx.stop_event and ctx.stop_event.is_set():
+        ctx.stop_flag = True
+        return {'chunk_id': chunk_id, 'top_k': [], 'num_processed': len(count_vectors_chunk)}
+
+    # スコア評価
+    with profile_block(ctx.metrics, "combination_evaluation"):
+        scores = evaluate_combinations(
+            z_pdn_batch,
             ctx.target_mask,
+            ctx.eval_mask,
+            count_vectors_gpu,
+            ctx.config,
+            xp,
+            ctx.f_grid,
+            eval_metadata=ctx.eval_metadata,
+        )
+
+    if ctx.stop_event and ctx.stop_event.is_set():
+        ctx.stop_flag = True
+        return {'chunk_id': chunk_id, 'top_k': [], 'num_processed': len(count_vectors_chunk)}
+
+    # チャンク内のtop_k抽出
+    with profile_block(ctx.metrics, "topk_extraction"):
+        chunk_top_k = extract_top_k(
+            z_pdn_batch,
+            scores,
+            count_vectors_gpu,
+            ctx.config.top_k,
+            xp
+        )
+
+    # Monte Carlo評価（有効な場合）
+    if ctx.config.mc_enable and len(chunk_top_k) > 0:
+        with profile_block(ctx.metrics, "monte_carlo_evaluation"):
+            mc_scores = monte_carlo_evaluation(
+                chunk_top_k,
+                ctx.capacitor_impedances,
+                ctx.capacitor_indices,
+                ctx.f_grid,
+                ctx.eval_mask,
+                ctx.target_mask,
             ctx.config,
             xp,
             ctx.pdn_assets,
+            eval_metadata=ctx.eval_metadata,
         )
         
         # MC最悪値をスコアに反映
-        mc_scores_host = transfer_to_device(mc_scores, np) if ctx.is_gpu else mc_scores
+        mc_scores_host = transfer_to_host(mc_scores) if ctx.is_gpu else mc_scores
         for i, result in enumerate(chunk_top_k):
             mc_value = float(mc_scores_host[i])
             result['mc_worst_score'] = mc_value
             result['total_score'] += ctx.config.weight_mc_worst * mc_value
-    
+
     # CPUに転送（必要な場合）
     if ctx.is_gpu:
         for result in chunk_top_k:
-            result['z_pdn'] = transfer_to_device(result['z_pdn'], np)
-            result['count_vector'] = transfer_to_device(result['count_vector'], np)
+            result['z_pdn'] = transfer_to_host(result['z_pdn'])
+            result['count_vector'] = transfer_to_host(result['count_vector'])
+
+        snapshot = get_memory_snapshot(ctx.xp)
+        for name, value in snapshot.items():
+            update_metric_max(ctx.metrics, f"gpu_{name}_max", value)
+
+    increment_metric(ctx.metrics, "chunk_processed", 1)
+    increment_metric(ctx.metrics, "topk_candidates_collected", len(chunk_top_k))
     
     return {
         'chunk_id': chunk_id,
@@ -528,6 +557,16 @@ def run_optimization(config: UserConfig,
 
     eval_mask = create_evaluation_mask(f_grid, eval_f_L, eval_f_H, xp)
     logger.info(f"評価帯域内の周波数点数: {xp.sum(eval_mask)}")
+    eval_indices = xp.where(eval_mask)[0]
+    eval_metadata: Dict[str, Any] = {
+        'indices': eval_indices,
+        'n_eval': int(eval_indices.size),
+    }
+    if int(eval_indices.size) >= 2:
+        f_eval = f_grid[eval_indices]
+        df_log = xp.log10(f_eval[1:] / f_eval[:-1])
+        df_log = xp.where(xp.isfinite(df_log) & (df_log > 0), df_log, 0.0)
+        eval_metadata['df_log'] = df_log
     
     # 目標マスク生成（モード対応）
     target_mask = create_target_mask(
@@ -574,8 +613,8 @@ def run_optimization(config: UserConfig,
     
     logger.info(f"コンデンサ候補（容量小→大）: {sorted_cap_names}")
     
-    f_grid_host = transfer_to_device(f_grid, np)
-    target_mask_host = transfer_to_device(target_mask, np)
+    f_grid_host = transfer_to_host(f_grid)
+    target_mask_host = transfer_to_host(target_mask)
 
     # 最適化コンテキスト作成
     ctx = OptimizationContext(
@@ -596,6 +635,7 @@ def run_optimization(config: UserConfig,
         capacitor_indices=xp.arange(len(sorted_cap_names)),
         pdn_assets=pdn_assets,
         top_k_results=[],
+        eval_metadata=eval_metadata,
         gui_callback=gui_callback,
         stop_event=stop_event,
     )
@@ -615,7 +655,7 @@ def run_optimization(config: UserConfig,
             xp,
             prepared=ctx.pdn_assets,
         )[0]
-        z_without_decap_np = transfer_to_device(z_without_decap, np)
+        z_without_decap_np = transfer_to_host(z_without_decap)
         ctx.z_without_decap = z_without_decap_np
     except Exception as exc:
         logger.error(f"PDN特性（デカップリングなし）計算に失敗しました: {exc}")
@@ -631,44 +671,11 @@ def run_optimization(config: UserConfig,
             payload['z_without_decap'] = z_without_decap_np
         gui_callback(payload)
 
-    min_counts_list: List[int] = []
-    max_counts_list: List[int] = []
     max_total_parts = config.max_total_parts
-
-    for name in sorted_cap_names:
-        cap_cfg = next((c for c in config.capacitors if c['name'] == name), {})
-        min_val = cap_cfg.get('MIN') if cap_cfg else None
-        max_val = cap_cfg.get('MAX') if cap_cfg else None
-
-        try:
-            min_count = int(min_val) if min_val is not None else 0
-        except Exception:
-            logger.warning(f"コンデンサ {name} の最小使用数 {min_val} を整数化できませんでした。0 に設定します")
-            min_count = 0
-
-        try:
-            max_count = int(max_val) if max_val is not None else max_total_parts
-        except Exception:
-            logger.warning(f"コンデンサ {name} の最大使用数 {max_val} を整数化できませんでした。max_total_parts に合わせます")
-            max_count = max_total_parts
-
-        if max_count > max_total_parts:
-            logger.info(f"コンデンサ {name} の最大使用数 {max_count} を max_total_parts ({max_total_parts}) に合わせます")
-            max_count = max_total_parts
-
-        if min_count < 0:
-            logger.info(f"コンデンサ {name} の最小使用数 {min_count} を0に切り上げます")
-            min_count = 0
-
-        if max_count < min_count:
-            logger.info(f"コンデンサ {name} の最大使用数 {max_count} が最小使用数 {min_count} より小さいため調整します")
-            max_count = min_count
-
-        min_counts_list.append(min_count)
-        max_counts_list.append(max_count)
-
-    min_counts_arr = np.asarray(min_counts_list, dtype=np.int32)
-    max_counts_arr = np.asarray(max_counts_list, dtype=np.int32)
+    min_counts_arr, max_counts_arr = resolve_capacitor_usage_bounds(
+        config,
+        sorted_cap_names,
+    )
 
     min_total = max(1, int(config.max_total_parts * config.min_total_parts_ratio))
     min_total = max(min_total, int(np.sum(min_counts_arr)))
@@ -789,9 +796,16 @@ def run_optimization(config: UserConfig,
     ctx.top_k_results = global_top_k
 
     host_cap_impedances = {
-        name: transfer_to_device(z, np)
+        name: transfer_to_host(z)
         for name, z in sorted_cap_impedances.items()
     }
+    host_eval_metadata: Dict[str, Any] = {}
+    if ctx.eval_metadata:
+        for key, value in ctx.eval_metadata.items():
+            if hasattr(value, '__cuda_array_interface__') or isinstance(value, np.ndarray):
+                host_eval_metadata[key] = transfer_to_host(value)
+            else:
+                host_eval_metadata[key] = value
 
     if ctx.is_gpu:
         sorted_cap_impedances.clear()
@@ -813,6 +827,7 @@ def run_optimization(config: UserConfig,
         'backend': backend_name,
         'gpu_info': get_gpu_info(config.cuda) if is_gpu else None,
         'capacitor_impedances': host_cap_impedances,
+        'eval_metadata': host_eval_metadata,
         'stopped': bool(ctx.stop_flag)
     }
 
@@ -822,6 +837,7 @@ def run_optimization(config: UserConfig,
             export_to_excel(results, config)
     
     logger.info("最適化処理が完了しました")
+    log_metrics(ctx.metrics)
     
     return results
 

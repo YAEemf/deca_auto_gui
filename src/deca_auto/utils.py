@@ -2,7 +2,7 @@ import time
 import traceback
 import logging
 import sys
-from typing import Optional, Union, Any, Tuple, List
+from typing import Optional, Union, Any, Tuple, List, Dict
 from contextlib import contextmanager
 from functools import wraps
 import numpy as np
@@ -321,6 +321,26 @@ def get_vram_budget(max_vram_ratio: float = 0.5, cuda_device: int = 0) -> Tuple[
 
 
 # 配列変換ヘルパー
+def is_gpu_backend(xp: Any) -> bool:
+    """xpがCuPyを指すGPUバックエンドか判定"""
+    return CUPY_AVAILABLE and getattr(xp, "__name__", "") == "cupy"
+
+
+def transfer_to_host(data: Any, dtype: Optional[np.dtype] = None) -> np.ndarray:
+    """ホスト側（NumPy）へ明示的に転送"""
+    if isinstance(data, np.ndarray):
+        return data.astype(dtype, copy=False) if dtype is not None and data.dtype != dtype else data
+    if CUPY_AVAILABLE and hasattr(data, "__cuda_array_interface__"):
+        host = cp.asnumpy(data)
+        if dtype is not None and host.dtype != dtype:
+            host = host.astype(dtype, copy=False)
+        return host
+    host = np.asarray(data)
+    if dtype is not None and host.dtype != dtype:
+        host = host.astype(dtype, copy=False)
+    return host
+
+
 def ensure_numpy(array: Union[np.ndarray, Any]) -> np.ndarray:
     """
     配列をNumPy配列に変換（CuPy配列の場合はCPUに転送）
@@ -396,13 +416,25 @@ def transfer_to_device(data: Any, xp: Any, dtype: Optional[np.dtype] = None) -> 
         - すでに目的のデバイスにある場合はコピーを避ける
         - 型変換が必要な場合のみ実行
     """
-    if xp is np:
-        result = ensure_numpy(data)
-        if dtype is not None and result.dtype != dtype:
-            return result.astype(dtype, copy=False)
-        return result
-    else:
-        return ensure_cupy(data, dtype)
+    if not is_gpu_backend(xp):
+        return transfer_to_host(data, dtype)
+
+    if hasattr(data, "__cuda_array_interface__"):
+        if dtype is not None and getattr(data, "dtype", None) != dtype:
+            return xp.asarray(data, dtype=dtype)
+        return data
+
+    return xp.asarray(data, dtype=dtype) if dtype else xp.asarray(data)
+
+
+def xp_array(xp: Any, data: Any, dtype: Optional[np.dtype] = None, copy: bool = False) -> Any:
+    """任意のバックエンドに合わせて配列化"""
+    if is_gpu_backend(xp):
+        arr = transfer_to_device(data, xp, dtype)
+        return xp.array(arr, dtype=dtype, copy=copy) if copy else arr
+
+    host = transfer_to_host(data, dtype)
+    return np.array(host, dtype=dtype, copy=copy) if copy else host
 
 
 # データ型ヘルパー
@@ -449,6 +481,97 @@ class Timer:
         if self.verbose:
             logger.info(f"{self.name}: {self.elapsed:.3f}秒")
 
+
+def _ensure_metric_bucket(metrics: Dict[str, Dict[str, float]], key: str) -> Dict[str, float]:
+    """メトリクス辞書にバケットを確保"""
+    bucket = metrics.get(key)
+    if bucket is None:
+        bucket = {"count": 0.0, "total": 0.0, "max": 0.0}
+        metrics[key] = bucket
+    return bucket
+
+
+@contextmanager
+def profile_block(metrics: Optional[Dict[str, Dict[str, float]]], key: str):
+    """
+    指定キーの処理時間を計測し累積
+
+    Args:
+        metrics: メトリクス辞書
+        key: 記録用キー
+    """
+    if metrics is None:
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            _ = time.perf_counter() - start
+        return
+
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        bucket = _ensure_metric_bucket(metrics, key)
+        bucket["count"] += 1.0
+        bucket["total"] += elapsed
+        if elapsed > bucket["max"]:
+            bucket["max"] = elapsed
+
+
+def increment_metric(metrics: Optional[Dict[str, Any]], key: str, value: float) -> None:
+    """加算系メトリクスの更新"""
+    if metrics is None:
+        return
+    metrics[key] = float(metrics.get(key, 0.0)) + float(value)
+
+
+def update_metric_max(metrics: Optional[Dict[str, Any]], key: str, value: float) -> None:
+    """最大値メトリクスの更新"""
+    if metrics is None:
+        return
+    value_f = float(value)
+    metrics[key] = max(float(metrics.get(key, value_f)), value_f)
+
+
+def get_memory_snapshot(xp: Any) -> Dict[str, float]:
+    """現在のメモリ使用量を取得"""
+    snapshot: Dict[str, float] = {}
+    if xp is None or xp is np:
+        return snapshot
+    if not CUPY_AVAILABLE or getattr(xp, "__name__", "") != "cupy":
+        return snapshot
+    try:
+        mempool = xp.get_default_memory_pool()
+        snapshot["device_used_bytes"] = float(mempool.used_bytes())
+        snapshot["device_total_bytes"] = float(mempool.total_bytes())
+    except Exception:
+        pass
+    try:
+        pinned_pool = xp.get_default_pinned_memory_pool()
+        snapshot["pinned_used_bytes"] = float(pinned_pool.used_bytes())
+        snapshot["pinned_total_bytes"] = float(pinned_pool.total_bytes())
+    except Exception:
+        pass
+    return snapshot
+
+
+def log_metrics(metrics: Optional[Dict[str, Any]]) -> None:
+    """収集したメトリクスをログ出力"""
+    if not metrics:
+        return
+    formatted = []
+    for key, value in metrics.items():
+        if isinstance(value, dict):
+            formatted.append(
+                f"{key}: count={value.get('count', 0):.0f}, "
+                f"total={value.get('total', 0.0):.3f}s, "
+                f"max={value.get('max', 0.0):.3f}s"
+            )
+        else:
+            formatted.append(f"{key}: {value}")
+    logger.info("Telemetry metrics -> " + "; ".join(formatted))
 
 # デコレータ版タイマー
 def timed(func):

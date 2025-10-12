@@ -211,6 +211,7 @@ def write_detail_sheet(worksheet, results: Dict, config: UserConfig,
             eval_f_L, eval_f_H = custom_f_L, custom_f_H
     
     eval_mask = (f_grid >= eval_f_L) & (f_grid <= eval_f_H)
+    eval_metadata = results.get('eval_metadata')
     
     for i, result in enumerate(top_k[:config.top_k]):
         row += 1
@@ -227,6 +228,7 @@ def write_detail_sheet(worksheet, results: Dict, config: UserConfig,
             config,
             np,
             f_grid=f_grid,
+            eval_metadata=eval_metadata,
         )
         
         worksheet.write(row, 0, result.get('rank', i+1), cell_format)
