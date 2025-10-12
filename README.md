@@ -101,6 +101,11 @@ python -m deca_auto --no-gui --config config.toml
 - 部品数や種類がなるべく少ない候補が欲しい時：**`Max total parts`で許容できる部品数上限を設定**した上で`Parts`や`Type`を大きくする  
 - 共振の目立つ荒い特性でもなるべく低いインピーダンス特性が欲しい時：`Under`と`Resonance`を下げる  
 
+### 4. 結果
+PDNのインピーダンス特性グラフはマウスのホイールを回すと拡大/縮小できます。ダブルクリックでズーム解除  
+
+![""](Zoom.png)
+
 ---
 
 ## 👤 Author
