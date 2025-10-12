@@ -489,7 +489,7 @@ def run_optimization(config: UserConfig,
     if is_gpu:
         gpu_info = get_gpu_info(config.cuda)
         if gpu_info:
-            logger.info(f"GPU情報: {gpu_info['name']} - "
+            logger.info(f"選択中GPU: {gpu_info['name']} \n"
                        f"Total: {gpu_info['total_memory_gb']:.2f}GB, "
                        f"Free: {gpu_info['free_memory_gb']:.2f}GB")
     
@@ -572,7 +572,7 @@ def run_optimization(config: UserConfig,
     if pdn_assets.get('cap_names') != tuple(sorted_cap_names):
         pdn_assets['cap_names'] = tuple(sorted_cap_names)
     
-    logger.info(f"コンデンサ順序（容量小→大）: {sorted_cap_names}")
+    logger.info(f"コンデンサ候補（容量小→大）: {sorted_cap_names}")
     
     f_grid_host = transfer_to_device(f_grid, np)
     target_mask_host = transfer_to_device(target_mask, np)
@@ -704,7 +704,7 @@ def run_optimization(config: UserConfig,
         estimated_mem = chunk_size * bytes_per_combination / (1024 ** 2)
 
         logger.info(
-            f"チャンクサイズ: {chunk_size} 組み合わせ/チャンク (推定使用メモリ: {estimated_mem:.2f} MB)"
+            f"チャンクサイズ: {chunk_size} Combi/Chunk (推定使用メモリ: {estimated_mem:.2f} MB)"
         )
 
         buffer_limit = None

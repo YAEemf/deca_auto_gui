@@ -409,7 +409,6 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
         (z_c, capacitance): インピーダンスと容量値
     """
     name = cap_config['name']
-    logger.info(f"コンデンサ {name} のインピーダンス計算中...")
     
     z_c = None
     capacitance_raw = cap_config.get('C', None)
@@ -544,14 +543,13 @@ def calculate_all_capacitor_impedances(config: UserConfig, f_grid: np.ndarray,
                 'frequency': transfer_to_device(f_grid, np)
             })
     
-    logger.info(f"全{len(capacitor_impedances)}個のコンデンサのZ_c計算完了")
+    logger.info(f"各コンデンサZ_c計算完了：{len(capacitor_impedances)}種類")
     
     # 容量でソート情報を出力
     sorted_names = sorted(capacitances.keys(), key=lambda k: capacitances[k])
-    logger.info("容量順序（小→大）:")
     for name in sorted_names:
         c_value = capacitances[name]
         c_str = f"{c_value*1e6:.3f}μF" if c_value >= 1e-6 else f"{c_value*1e9:.3f}nF"
-        logger.info(f"  {name}: {c_str}")
+        logger.info(f"{name}: {c_str}")
     
     return capacitor_impedances

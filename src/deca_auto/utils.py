@@ -143,7 +143,7 @@ def get_backend(force_numpy: bool = False, cuda_device: int = 0) -> Tuple[Any, s
         (xp, backend_name, is_gpu): バックエンドモジュール、名前、GPU使用フラグ
     """
     if force_numpy or not CUPY_AVAILABLE:
-        logger.info("NumPyバックエンドを使用します")
+        logger.info("NumPyを使用します")
         return np, "numpy", False
     
     try:
@@ -160,8 +160,7 @@ def get_backend(force_numpy: bool = False, cuda_device: int = 0) -> Tuple[Any, s
         total_memory = device.mem_info[1] / 1024**3  # GB
         free_memory = device.mem_info[0] / 1024**3  # GB
         
-        logger.info(f"CuPyバックエンドを使用します (GPU {cuda_device})")
-        logger.info(f"GPU: {props.get('DeviceName', 'Unknown')} - Total: {total_memory:.2f}GB, Free: {free_memory:.2f}GB")
+        logger.info(f"CuPyを使用します (GPU {cuda_device})")
         
         return cp, "cupy", True
         
