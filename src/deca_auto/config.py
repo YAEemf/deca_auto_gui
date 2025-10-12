@@ -126,14 +126,14 @@ class UserConfig:
     buffer_limit: float = 100e6  # バッファサイズ上限
     
     # スコア重み
-    weight_max: float = 0.3
+    weight_max: float = 0.5
     weight_area: float = 1.0
     weight_mean: float = 0.2
-    weight_anti: float = 0.3
+    weight_anti: float = 0.2
     weight_flat: float = 0.0
     weight_under: float = 0.1
-    weight_parts: float = 0.1
-    weight_num_types: float = 0.1
+    weight_parts: float = 0.2
+    weight_num_types: float = 0.2
     weight_resonance: float = 0.1
     weight_mc_worst: float = 1.0
     ignore_safe_anti_resonance: bool = False
