@@ -74,11 +74,11 @@ class UserConfig:
         ]
     )  # カスタムマスク [(freq, impedance), ...]
 
-    # 自動計算モード用パラメーター
-    v_supply: float = 3.3  # 電源電圧 [V]
+    # 自動計算モード用パラメーター(FPGAのCore電圧を想定)
+    v_supply: float = 1.2  # 電源電圧 [V]
     ripple_ratio: Optional[float] = 5.0  # 許容リップル率 [%]
     ripple_voltage: Optional[float] = None  # 許容リップル電圧 [V] (ripple_ratioと排他)
-    i_max: float = 5.0  # 最大供給電流 [A]
+    i_max: float = 10.0  # 最大供給電流 [A]
     switching_activity: Optional[float] = 0.5  # 電流変動率 (0-1)
     i_transient: Optional[float] = None  # 過渡電流 [A] (switching_activityと排他)
     design_margin: float = 15.0  # デザインマージン [%]
@@ -107,10 +107,12 @@ class UserConfig:
         {"name": "C_0603_0.22u", "C": 0.22e-6, "ESR": 15e-3, "ESL": 2e-10},
         {"name": "C_0603_0.33u", "C": 0.33e-6, "ESR": 15e-3, "ESL": 2e-10},
         {"name": "C_0603_0.47u", "C": 0.47e-6, "ESR": 15e-3, "ESL": 2e-10},
+        {"name": "C_0603_0.68u", "C": 0.68e-6, "ESR": 15e-3, "ESL": 2e-10},
         {"name": "C_0603_1u", "C": 1e-6, "ESR": 12e-3, "ESL": 2e-10},
         {"name": "C_0603_2.2u", "C": 2.2e-6, "ESR": 12e-3, "ESL": 2e-10},
         {"name": "C_0603_3.3u", "C": 3.3e-6, "ESR": 12e-3, "ESL": 2e-10},
         {"name": "C_0603_4.7u", "C": 4.7e-6, "ESR": 12e-3, "ESL": 2e-10},
+        {"name": "C_0603_6.8u", "C": 6.8e-6, "ESR": 12e-3, "ESL": 2e-10},
         {"name": "C_1608_10u", "C": 10e-6, "ESR": 10e-3, "ESL": 3e-10},
         {"name": "C_2012_22u", "C": 22e-6, "ESR": 10e-3, "ESL": 5e-10},
         {"name": "C_2012_33u", "C": 33e-6, "ESR": 10e-3, "ESL": 5e-10},
@@ -128,10 +130,10 @@ class UserConfig:
     # スコア重み
     weight_max: float = 0.5
     weight_area: float = 1.0
-    weight_mean: float = 0.2
-    weight_anti: float = 0.2
+    weight_mean: float = 0.3
+    weight_anti: float = 0.1
     weight_flat: float = 0.0
-    weight_under: float = 0.1
+    weight_under: float = -0.1
     weight_parts: float = 0.2
     weight_num_types: float = 0.2
     weight_resonance: float = 0.1
