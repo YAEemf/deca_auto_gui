@@ -43,8 +43,8 @@ class CapacitorConfig:
     path: Optional[str] = ""    # SPICEモデルパス
     C: Optional[float] = 0.0      # 容量値 [F]
     ESR: float = 15e-3          # 等価直列抵抗 [Ω]
-    ESL: float = 2e-10         # 等価直列インダクタンス [H]
-    L_mnt: Optional[float] = 0.2e-10  # マウントインダクタンス [H]
+    ESL: float = 4e-10         # 等価直列インダクタンス [H]
+    L_mnt: Optional[float] = 0.5e-9  # マウントインダクタンス [H]
     MIN: Optional[int] = None   # 最小使用数
     MAX: Optional[int] = None   # 最大使用数
 
@@ -103,20 +103,25 @@ class UserConfig:
     
     # コンデンサリスト
     capacitors: List[Dict[str, Any]] = field(default_factory=lambda: [
-        {"name": "C_0603_0.1u", "C": 0.1e-6, "ESR": 15e-3, "ESL": 2e-10},
-        {"name": "C_0603_0.22u", "C": 0.22e-6, "ESR": 15e-3, "ESL": 2e-10},
-        {"name": "C_0603_0.33u", "C": 0.33e-6, "ESR": 15e-3, "ESL": 2e-10},
-        {"name": "C_0603_0.47u", "C": 0.47e-6, "ESR": 15e-3, "ESL": 2e-10},
-        {"name": "C_0603_0.68u", "C": 0.68e-6, "ESR": 15e-3, "ESL": 2e-10},
-        {"name": "C_0603_1u", "C": 1e-6, "ESR": 12e-3, "ESL": 2e-10},
-        {"name": "C_0603_2.2u", "C": 2.2e-6, "ESR": 12e-3, "ESL": 2e-10},
-        {"name": "C_0603_3.3u", "C": 3.3e-6, "ESR": 12e-3, "ESL": 2e-10},
-        {"name": "C_0603_4.7u", "C": 4.7e-6, "ESR": 12e-3, "ESL": 2e-10},
-        {"name": "C_0603_6.8u", "C": 6.8e-6, "ESR": 12e-3, "ESL": 2e-10},
-        {"name": "C_1608_10u", "C": 10e-6, "ESR": 10e-3, "ESL": 3e-10},
-        {"name": "C_2012_22u", "C": 22e-6, "ESR": 10e-3, "ESL": 5e-10},
-        {"name": "C_2012_33u", "C": 33e-6, "ESR": 10e-3, "ESL": 5e-10},
-        {"name": "C_2012_47u", "C": 47e-6, "ESR": 10e-3, "ESL": 5e-10},
+        {"name": "C_1005_10n", "C": 10e-9, "ESR": 20e-3, "ESL": 2e-10},
+        {"name": "C_1005_22n", "C": 22e-9, "ESR": 20e-3, "ESL": 2e-10},
+        {"name": "C_1005_33n", "C": 33e-9, "ESR": 20e-3, "ESL": 2e-10},
+        {"name": "C_1005_47n", "C": 47e-9, "ESR": 20e-3, "ESL": 2e-10},
+        {"name": "C_1005_68n", "C": 68e-9, "ESR": 20e-3, "ESL": 2e-10},
+        {"name": "C_1608_0.1u", "C": 0.1e-6, "ESR": 15e-3, "ESL": 3e-10},
+        {"name": "C_1608_0.22u", "C": 0.22e-6, "ESR": 15e-3, "ESL": 3e-10},
+        {"name": "C_1608_0.33u", "C": 0.33e-6, "ESR": 15e-3, "ESL": 3e-10},
+        {"name": "C_1608_0.47u", "C": 0.47e-6, "ESR": 15e-3, "ESL": 3e-10},
+        {"name": "C_1608_0.68u", "C": 0.68e-6, "ESR": 15e-3, "ESL": 3e-10},
+        {"name": "C_1608_1u", "C": 1e-6, "ESR": 12e-3, "ESL": 3e-10},
+        {"name": "C_1608_2.2u", "C": 2.2e-6, "ESR": 12e-3, "ESL": 3e-10},
+        {"name": "C_1608_3.3u", "C": 3.3e-6, "ESR": 12e-3, "ESL": 3e-10},
+        {"name": "C_1608_4.7u", "C": 4.7e-6, "ESR": 12e-3, "ESL": 3e-10},
+        {"name": "C_1608_6.8u", "C": 6.8e-6, "ESR": 12e-3, "ESL": 3e-10},
+        {"name": "C_2012_10u", "C": 10e-6, "ESR": 10e-3, "ESL": 4e-10},
+        {"name": "C_3216_22u", "C": 22e-6, "ESR": 10e-3, "ESL": 6e-10},
+        {"name": "C_3216_33u", "C": 33e-6, "ESR": 10e-3, "ESL": 6e-10},
+        {"name": "C_3216_47u", "C": 47e-6, "ESR": 10e-3, "ESL": 6e-10},
         {"name": "C_Poly_100u", "C": 100e-6, "ESR": 100e-3, "ESL": 1.5e-9},
     ])
     
@@ -128,13 +133,13 @@ class UserConfig:
     buffer_limit: float = 100e6  # バッファサイズ上限
     
     # スコア重み
-    weight_max: float = 0.5
+    weight_max: float = 0.6
     weight_area: float = 1.0
     weight_mean: float = 0.3
     weight_anti: float = 0.1
-    weight_flat: float = 0.0
+    weight_flat: float = 0.1
     weight_under: float = -0.1
-    weight_parts: float = 0.2
+    weight_parts: float = 0.1
     weight_num_types: float = 0.2
     weight_resonance: float = 0.1
     weight_mc_worst: float = 1.0
