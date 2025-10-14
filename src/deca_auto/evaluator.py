@@ -18,7 +18,28 @@ def calculate_score_components_batch(
     eval_metadata: Optional[Dict[str, Any]] = None,
     z_without_decap: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """バッチ処理版スコアコンポーネント計算"""
+    """
+    バッチ処理版スコアコンポーネント計算
+
+    評価項目（全て正の値で、小さいほど良い特性）:
+        - max: 最大インピーダンス比
+        - area: 目標超過面積（台形積分）
+        - mean: 平均インピーダンス比（対数周波数重み付き）
+        - anti: アンチレゾナンス（ピークの高さと鋭さを考慮）
+        - flat: 平滑さ（対数周波数での重み付き変動係数）
+        - under: 目標未達面積（負の重みで良い特性として評価）
+        - parts: 部品数（正規化）
+        - num_types: 種類数（正規化）
+        - resonance: レゾナンス（谷の深さ、鋭さ、周波数重みを考慮）
+        - improvement: Without Decapからの悪化面積
+        - low_improvement: 低改善度帯域の面積
+
+    改善内容（v8.1）:
+        - mean: 対数周波数での重み付き平均に変更
+        - flat: 対数周波数での重み付き標準偏差と変動係数に変更
+        - anti: ピークの鋭さ（周辺との高さ比）を考慮
+        - resonance: 谷の鋭さと低周波数での重要度を考慮
+    """
 
     z_pdn_batch = xp.asarray(z_pdn_batch)
     if z_pdn_batch.ndim == 1:
@@ -85,14 +106,41 @@ def calculate_score_components_batch(
     ratio = z_eval / t_eval
     ratio_clipped = xp.maximum(ratio, 1e-12)
 
+    # 最大インピーダンス比（目標インピーダンスに対する最大値）
     score_max = xp.minimum(ratio_clipped.max(axis=1), 50.0)
-    score_mean_raw = ratio_clipped.mean(axis=1)
+
+    # 平均インピーダンス比（対数周波数での重み付き平均）
+    # 対数周波数スケールでは各周波数点の重要度が異なるため、周波数区間の対数幅で重み付け
+    weights_normalized = None  # 初期化（flatスコアでも使用）
+
+    if n_eval >= 2:
+        # 各周波数点の重み = その周波数区間の対数幅の割合
+        weights = xp.zeros(n_eval, dtype=float_dtype)
+        weights[0] = df_log[0] if df_log.size > 0 else 0.0
+        weights[1:-1] = 0.5 * (df_log[:-1] + df_log[1:]) if df_log.size > 1 else 0.0
+        weights[-1] = df_log[-1] if df_log.size > 0 else 0.0
+
+        total_weight = xp.maximum(weights.sum(), 1e-12)
+        weights_normalized = weights / total_weight
+
+        # 重み付き平均
+        score_mean_raw = (ratio_clipped * weights_normalized).sum(axis=1)
+    else:
+        # 点数が少ない場合は単純平均
+        score_mean_raw = ratio_clipped.mean(axis=1)
+
     score_mean = xp.minimum(score_mean_raw, 50.0)
 
+    # 目標超過面積（area）：目標インピーダンスを超えた部分の面積
+    # 台形積分で対数周波数スケールの面積を計算
     excess = xp.maximum(ratio_clipped - 1.0, 0.0)
     if n_eval >= 2:
         traps = 0.5 * (excess[:, :-1] + excess[:, 1:]) * df_log
         score_area = traps.sum(axis=1)
+
+        # 目標未達面積（under）：目標インピーダンスを下回った部分の面積
+        # これは良い特性なので、負の重み（weight_under < 0）で評価される
+        # スコア自体は正の値として計算し、重み付け時に負にすることで総スコアを改善
         under_ratio = xp.maximum(1.0 - ratio_clipped, 0.0)
         under_traps = 0.5 * (under_ratio[:, :-1] + under_ratio[:, 1:]) * df_log
         score_under = under_traps.sum(axis=1)
@@ -103,29 +151,76 @@ def calculate_score_components_batch(
     score_area = xp.minimum(score_area, 50.0)
     score_under = xp.minimum(score_under, 50.0)
 
+    # アンチレゾナンス評価（ピークの高さと鋭さを考慮）
     if n_eval > 2:
         center = ratio_clipped[:, 1:-1]
-        peak_mask = (center > ratio_clipped[:, :-2]) & (center > ratio_clipped[:, 2:])
+        left = ratio_clipped[:, :-2]
+        right = ratio_clipped[:, 2:]
+
+        # ローカルピークを検出
+        peak_mask = (center > left) & (center > right)
         peak_vals = xp.where(peak_mask, center, 0.0)
         peak_excess = xp.maximum(peak_vals - 1.0, 0.0)
 
+        # ignore_safe_anti_resonanceフラグ：目標以下のピークを無視
         if getattr(config, 'ignore_safe_anti_resonance', False):
             peak_excess = xp.where(peak_vals <= 1.0, 0.0, peak_excess)
-        peaks_count = xp.count_nonzero(peak_excess > 0.0, axis=1)
-        sum_peak = peak_excess.sum(axis=1)
-        avg_peak = safe_divide(sum_peak, xp.maximum(peaks_count, 1), 0.0, xp)
-        score_anti = peaks_count.astype(float_dtype) * avg_peak
+
+        # ピークの鋭さを評価（周辺との高さ比）
+        # sharpness = (center - neighbor_mean) / neighbor_mean
+        neighbor_mean = 0.5 * (left + right)
+        sharpness = safe_divide(
+            center - neighbor_mean,
+            xp.maximum(neighbor_mean, 1e-12),
+            0.0,
+            xp
+        )
+        # 鋭さは正の値のみ考慮（ピークの場合のみ）
+        sharpness = xp.where(peak_mask, xp.maximum(sharpness, 0.0), 0.0)
+
+        # スコア計算：ピーク高さに鋭さの重みを加える
+        # ピークが鋭いほど悪い特性として評価
+        sharpness_weight = 0.5  # 鋭さの重み係数
+        weighted_peak_excess = peak_excess * (1.0 + sharpness_weight * sharpness)
+
+        # 総スコア = 重み付きピーク高さの合計
+        score_anti = weighted_peak_excess.sum(axis=1)
     else:
         score_anti = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
 
     score_anti = xp.minimum(score_anti, 50.0)
 
-    score_flat = safe_divide(
-        ratio_clipped.std(axis=1),
-        xp.maximum(score_mean_raw, 1e-12),
-        0.0,
-        xp,
-    )
+    # 平滑さ評価（対数周波数での重み付き標準偏差と変動係数）
+    # 周波数特性の平坦性を評価：変動が大きいほど悪い特性
+    if n_eval >= 2 and weights_normalized is not None:
+        # 対数周波数での重み付き標準偏差
+        weighted_mean = score_mean_raw[:, xp.newaxis]  # ブロードキャスト用に次元追加
+
+        # 各点の偏差を計算
+        deviation = ratio_clipped - weighted_mean
+
+        # 重み付き分散
+        weighted_variance = (weights_normalized * deviation ** 2).sum(axis=1)
+
+        # 重み付き標準偏差
+        weighted_std = xp.sqrt(xp.maximum(weighted_variance, 0.0))
+
+        # 変動係数（CV: Coefficient of Variation）
+        score_flat = safe_divide(
+            weighted_std,
+            xp.maximum(score_mean_raw, 1e-12),
+            0.0,
+            xp,
+        )
+    else:
+        # 点数が少ない場合は単純な変動係数
+        score_flat = safe_divide(
+            ratio_clipped.std(axis=1),
+            xp.maximum(score_mean_raw, 1e-12),
+            0.0,
+            xp,
+        )
+
     score_flat = xp.minimum(score_flat, 10.0)
 
     # コンデンサ種類数（正規化）
@@ -137,30 +232,57 @@ def calculate_score_components_batch(
         xp,
     )
 
+    # レゾナンス評価（谷の深さ、鋭さ、周波数位置の重要度を考慮）
     if n_eval > 2:
         z_eval_local = xp.abs(z_pdn_batch)[:, freq_indices]
         left = z_eval_local[:, :-2]
         center_abs = z_eval_local[:, 1:-1]
         right = z_eval_local[:, 2:]
+
+        # ローカルミニマムを検出
         neighbor_mean = 0.5 * (left + right)
         local_min_mask = (center_abs < left) & (center_abs < right)
+
+        # 谷の深さ（周辺と中心の比率）
         depth_ratio = safe_divide(neighbor_mean, xp.maximum(center_abs, 1e-18), 1.0, xp) - 1.0
         depth_ratio = xp.where(local_min_mask, xp.maximum(depth_ratio, 0.0), 0.0)
-        score_resonance = xp.minimum(depth_ratio.sum(axis=1), 50.0)
+
+        # 谷の鋭さ（両隣との高さ差の比率）
+        # 鋭い谷ほどQ値が高く、問題となりやすい
+        left_drop = safe_divide(left - center_abs, xp.maximum(center_abs, 1e-18), 0.0, xp)
+        right_drop = safe_divide(right - center_abs, xp.maximum(center_abs, 1e-18), 0.0, xp)
+        sharpness = 0.5 * (left_drop + right_drop)
+        sharpness = xp.where(local_min_mask, xp.maximum(sharpness, 0.0), 0.0)
+
+        # 周波数位置による重み付け（低周波数の谷ほど問題になりやすい）
+        if f_grid is not None:
+            f_eval_local = xp.asarray(f_grid)[freq_indices][1:-1]
+            f_L_val = float(metadata.get('f_L', freq_indices[0])) if metadata else float(freq_indices[0])
+            # 対数スケールでの周波数重み（低周波数: 1.0 → 高周波数: 0.5）
+            freq_weight = 1.0 / (1.0 + 0.5 * xp.log10(xp.maximum(f_eval_local / f_L_val, 1.0)))
+        else:
+            freq_weight = xp.ones_like(depth_ratio[0, :])
+
+        # 総合スコア = 深さ × (1 + 鋭さの重み) × 周波数重み
+        sharpness_weight = 0.3  # 鋭さの重み係数
+        weighted_depth = depth_ratio * (1.0 + sharpness_weight * sharpness) * freq_weight
+
+        score_resonance = xp.minimum(weighted_depth.sum(axis=1), 50.0)
     else:
         score_resonance = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
 
-    # Improvement評価（Without Decapとの比較）
-    # z_pdn > z_without_decap となる面積を計算
+    # Improvement評価（デカップリングコンデンサなし（Without Decap）との比較）
+    # デカップリングコンデンサの追加によってインピーダンスが悪化した部分を検出
     if z_without_decap is not None:
         z_without_decap = xp.asarray(z_without_decap)
         z_base_eval = xp.abs(z_without_decap)[freq_indices]
 
-        # 悪化部分の比率を計算（z_pdn / z_without_decap - 1.0）
+        # 悪化比率を計算：z_pdn / z_without_decap
+        # 1.0より大きい部分 = デカップリングコンデンサによって悪化した部分
         degradation_ratio = safe_divide(z_eval, xp.maximum(z_base_eval, 1e-18), 1.0, xp)
         degradation_excess = xp.maximum(degradation_ratio - 1.0, 0.0)
 
-        # 面積計算（台形積分）
+        # 悪化部分の面積を台形積分で計算
         if n_eval >= 2:
             degrade_traps = 0.5 * (degradation_excess[:, :-1] + degradation_excess[:, 1:]) * df_log
             score_improvement = degrade_traps.sum(axis=1)
@@ -169,18 +291,18 @@ def calculate_score_components_batch(
 
         score_improvement = xp.minimum(score_improvement, 50.0).astype(float_dtype, copy=False)
 
-        # 低改善度帯域の評価（改善度が閾値未満の帯域のペナルティ）
-        # improvement_ratio = 1.0 - (z_pdn / z_without_decap) で改善度を計算
-        # improvement_ratio < threshold の部分を検出
+        # 低改善度帯域の評価
+        # improvement_ratio = 1.0 - (z_pdn / z_without_decap) で改善度を定義
+        # 改善度が閾値未満の帯域はデカップリングコンデンサの効果が不十分
         improvement_ratio = 1.0 - degradation_ratio
-        threshold = float(getattr(config, 'low_improvement_threshold', 0.05))
+        threshold = float(getattr(config, 'low_improvement_threshold', 0.15))
 
         # 改善度が閾値未満の部分を検出（0.0 <= improvement_ratio < threshold）
-        # ただし、悪化している部分（improvement_ratio < 0）は既にimprovementスコアでペナルティ済みなので除外
+        # 悪化部分（improvement_ratio < 0）は既にimprovementスコアで評価済みなので除外
         low_improvement_mask = (improvement_ratio >= 0.0) & (improvement_ratio < threshold)
         low_improvement_value = xp.where(low_improvement_mask, threshold - improvement_ratio, 0.0)
 
-        # 面積計算（台形積分）
+        # 低改善度帯域の面積を台形積分で計算
         if n_eval >= 2:
             low_imp_traps = 0.5 * (low_improvement_value[:, :-1] + low_improvement_value[:, 1:]) * df_log
             score_low_improvement = low_imp_traps.sum(axis=1)
@@ -189,7 +311,7 @@ def calculate_score_components_batch(
 
         score_low_improvement = xp.minimum(score_low_improvement, 50.0).astype(float_dtype, copy=False)
     else:
-        # Without Decapがない場合はペナルティなし
+        # Without Decapデータがない場合は評価なし
         score_improvement = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
         score_low_improvement = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
 
