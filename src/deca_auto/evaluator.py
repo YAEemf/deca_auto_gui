@@ -16,6 +16,7 @@ def calculate_score_components_batch(
     xp: Any = np,
     f_grid: Optional[Any] = None,
     eval_metadata: Optional[Dict[str, Any]] = None,
+    z_without_decap: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """バッチ処理版スコアコンポーネント計算"""
 
@@ -149,6 +150,49 @@ def calculate_score_components_batch(
     else:
         score_resonance = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
 
+    # Improvement評価（Without Decapとの比較）
+    # z_pdn > z_without_decap となる面積を計算
+    if z_without_decap is not None:
+        z_without_decap = xp.asarray(z_without_decap)
+        z_base_eval = xp.abs(z_without_decap)[freq_indices]
+
+        # 悪化部分の比率を計算（z_pdn / z_without_decap - 1.0）
+        degradation_ratio = safe_divide(z_eval, xp.maximum(z_base_eval, 1e-18), 1.0, xp)
+        degradation_excess = xp.maximum(degradation_ratio - 1.0, 0.0)
+
+        # 面積計算（台形積分）
+        if n_eval >= 2:
+            degrade_traps = 0.5 * (degradation_excess[:, :-1] + degradation_excess[:, 1:]) * df_log
+            score_improvement = degrade_traps.sum(axis=1)
+        else:
+            score_improvement = degradation_excess[:, 0]
+
+        score_improvement = xp.minimum(score_improvement, 50.0).astype(float_dtype, copy=False)
+
+        # 低改善度帯域の評価（改善度が閾値未満の帯域のペナルティ）
+        # improvement_ratio = 1.0 - (z_pdn / z_without_decap) で改善度を計算
+        # improvement_ratio < threshold の部分を検出
+        improvement_ratio = 1.0 - degradation_ratio
+        threshold = float(getattr(config, 'low_improvement_threshold', 0.05))
+
+        # 改善度が閾値未満の部分を検出（0.0 <= improvement_ratio < threshold）
+        # ただし、悪化している部分（improvement_ratio < 0）は既にimprovementスコアでペナルティ済みなので除外
+        low_improvement_mask = (improvement_ratio >= 0.0) & (improvement_ratio < threshold)
+        low_improvement_value = xp.where(low_improvement_mask, threshold - improvement_ratio, 0.0)
+
+        # 面積計算（台形積分）
+        if n_eval >= 2:
+            low_imp_traps = 0.5 * (low_improvement_value[:, :-1] + low_improvement_value[:, 1:]) * df_log
+            score_low_improvement = low_imp_traps.sum(axis=1)
+        else:
+            score_low_improvement = low_improvement_value[:, 0]
+
+        score_low_improvement = xp.minimum(score_low_improvement, 50.0).astype(float_dtype, copy=False)
+    else:
+        # Without Decapがない場合はペナルティなし
+        score_improvement = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
+        score_low_improvement = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
+
     return {
         'max': score_max.astype(float_dtype, copy=False),
         'area': score_area.astype(float_dtype, copy=False),
@@ -159,6 +203,8 @@ def calculate_score_components_batch(
         'parts': score_parts.astype(float_dtype, copy=False),
         'num_types': score_num_types.astype(float_dtype, copy=False),
         'resonance': score_resonance.astype(float_dtype, copy=False),
+        'improvement': score_improvement,
+        'low_improvement': score_low_improvement,
     }
 
 
@@ -171,6 +217,7 @@ def calculate_score_components(
     xp: Any = np,
     f_grid: Optional[np.ndarray] = None,
     eval_metadata: Optional[Dict[str, Any]] = None,
+    z_without_decap: Optional[Any] = None,
 ) -> Dict[str, float]:
     """単一組み合わせのスコアコンポーネント"""
 
@@ -183,6 +230,7 @@ def calculate_score_components(
         xp,
         f_grid,
         eval_metadata=eval_metadata,
+        z_without_decap=z_without_decap,
     )
 
     return {
@@ -200,6 +248,7 @@ def evaluate_combinations(
     xp: Any = np,
     f_grid: Optional[np.ndarray] = None,
     eval_metadata: Optional[Dict[str, Any]] = None,
+    z_without_decap: Optional[Any] = None,
 ) -> np.ndarray:
     """
     バッチ評価（小さいほど良い）。
@@ -213,6 +262,7 @@ def evaluate_combinations(
         xp,
         f_grid,
         eval_metadata=eval_metadata,
+        z_without_decap=z_without_decap,
     )
 
     total = (
@@ -224,7 +274,9 @@ def evaluate_combinations(
         config.weight_parts * comps['parts'] +
         config.weight_under * comps['under'] +
         config.weight_num_types * comps['num_types'] +
-        config.weight_resonance * comps['resonance']
+        config.weight_resonance * comps['resonance'] +
+        config.weight_improvement * comps['improvement'] +
+        config.weight_low_improvement * comps['low_improvement']
     )
 
     return total.astype(xp.float32, copy=False)
@@ -303,7 +355,8 @@ def monte_carlo_evaluation(top_k_results: List[Dict],
                           config: UserConfig,
                           xp: Any = np,
                           pdn_assets: Optional[Dict[str, Any]] = None,
-                          eval_metadata: Optional[Dict[str, Any]] = None) -> np.ndarray:
+                          eval_metadata: Optional[Dict[str, Any]] = None,
+                          z_without_decap: Optional[Any] = None) -> np.ndarray:
     """
     Monte Carlo法でロバスト性を評価
     
@@ -364,6 +417,7 @@ def monte_carlo_evaluation(top_k_results: List[Dict],
             xp,
             f_grid,
             eval_metadata=eval_metadata,
+            z_without_decap=z_without_decap,
         )
 
         # 最悪値（最大スコア）を記録
@@ -423,7 +477,8 @@ def format_combination_name(count_vector: np.ndarray,
 
     if parts:
         combo_str = " + ".join(parts)
-        return f"{combo_str} (Total: {total})"
+        # return f"{combo_str} (Total: {total})"
+        return combo_str
     else:
         return "Empty"
 

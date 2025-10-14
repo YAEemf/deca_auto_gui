@@ -219,7 +219,8 @@ def render_weights_section():
         weight_fields = [
             'weight_max', 'weight_area', 'weight_mean', 'weight_anti',
             'weight_flat', 'weight_under', 'weight_parts',
-            'weight_num_types', 'weight_resonance', 'weight_mc_worst'
+            'weight_num_types', 'weight_resonance', 'weight_improvement',
+            'weight_low_improvement', 'low_improvement_threshold', 'weight_mc_worst'
         ]
 
         col1, col2 = st.columns(2)
@@ -229,12 +230,24 @@ def render_weights_section():
             config.weight_anti = st.slider("Anti-resonance", 0.0, 1.0, config.weight_anti, 0.1, key="sidebar_weights_slider_anti")
             config.weight_parts = st.slider("Parts", 0.0, 2.0, config.weight_parts, 0.1, key="sidebar_weights_slider_parts")
             config.weight_flat = st.slider("Flatness", 0.0, 1.0, config.weight_flat, 0.1, key="sidebar_weights_slider_flat")
+            config.weight_improvement = st.slider("Improvement", 0.0, 2.0, config.weight_improvement, 0.1, key="sidebar_weights_slider_improvement", help="Without Decapより悪化した部分のペナルティ")
         with col2:
             config.weight_mean = st.slider("Mean", 0.0, 1.0, config.weight_mean, 0.1, key="sidebar_weights_slider_mean")
             config.weight_under = st.slider("Under", -1.0, 1.0, config.weight_under, 0.1, key="sidebar_weights_slider_under")
             config.weight_resonance = st.slider('Resonance', 0.0, 1.0, config.weight_resonance, 0.1, key="sidebar_weights_slider_resonance")
             config.weight_num_types = st.slider('Types', 0.0, 2.0, config.weight_num_types, 0.1, key="sidebar_weights_slider_num_types")
             config.weight_mc_worst = st.slider("MC worst", 0.0, 1.0, config.weight_mc_worst, 0.1, key="sidebar_weights_slider_mc_worst")
+            config.weight_low_improvement = st.slider("Low Improvement", 0.0, 2.0, config.weight_low_improvement, 0.1, key="sidebar_weights_slider_low_improvement", help="改善度が不十分な帯域のペナルティ")
+
+        # Low Improvement Threshold text input
+        threshold_val = parse_value(
+            st.text_input("Low Improvement Threshold", format_value(config.low_improvement_threshold),
+                         key="sidebar_weights_text_low_improvement_threshold",
+                         help="改善度の閾値"),
+            config.low_improvement_threshold
+        )
+        if threshold_val is not None:
+            config.low_improvement_threshold = threshold_val
 
         config.ignore_safe_anti_resonance = st.checkbox(
             get_localized_text('ignore_safe_anti', config),

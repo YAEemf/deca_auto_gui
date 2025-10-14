@@ -404,6 +404,7 @@ def process_chunk(ctx: OptimizationContext,
             xp,
             ctx.f_grid,
             eval_metadata=ctx.eval_metadata,
+            z_without_decap=ctx.z_without_decap,
         )
 
     if ctx.stop_event and ctx.stop_event.is_set():
@@ -430,11 +431,12 @@ def process_chunk(ctx: OptimizationContext,
                 ctx.f_grid,
                 ctx.eval_mask,
                 ctx.target_mask,
-            ctx.config,
-            xp,
-            ctx.pdn_assets,
-            eval_metadata=ctx.eval_metadata,
-        )
+                ctx.config,
+                xp,
+                ctx.pdn_assets,
+                eval_metadata=ctx.eval_metadata,
+                z_without_decap=ctx.z_without_decap,
+            )
         
         # MC最悪値をスコアに反映
         mc_scores_host = transfer_to_host(mc_scores) if ctx.is_gpu else mc_scores

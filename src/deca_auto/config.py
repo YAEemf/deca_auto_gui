@@ -63,7 +63,7 @@ class UserConfig:
     f_H: float = 1e8  # 上限周波数 [Hz]
     
     # 目標マスク
-    target_impedance_mode: str = "custom"  # モード: "flat", "auto", "custom"
+    target_impedance_mode: str = "auto"  # モード: "flat", "auto", "custom"
     z_target: float = 10e-3  # 目標インピーダンス(フラット) [Ω]　 ΔV/ΔI=10e-3Ω
     z_custom_mask: Optional[List[Tuple[float, float]]] = field(
         default_factory=lambda: [
@@ -103,9 +103,9 @@ class UserConfig:
     
     # コンデンサリスト
     capacitors: List[Dict[str, Any]] = field(default_factory=lambda: [
-        {"name": "C_1005_10n", "C": 10e-9, "ESR": 20e-3, "ESL": 2e-10},
-        {"name": "C_1005_22n", "C": 22e-9, "ESR": 20e-3, "ESL": 2e-10},
-        {"name": "C_1005_33n", "C": 33e-9, "ESR": 20e-3, "ESL": 2e-10},
+        # {"name": "C_1005_10n", "C": 10e-9, "ESR": 20e-3, "ESL": 2e-10},
+        # {"name": "C_1005_22n", "C": 22e-9, "ESR": 20e-3, "ESL": 2e-10},
+        # {"name": "C_1005_33n", "C": 33e-9, "ESR": 20e-3, "ESL": 2e-10},
         {"name": "C_1005_47n", "C": 47e-9, "ESR": 20e-3, "ESL": 2e-10},
         {"name": "C_1005_68n", "C": 68e-9, "ESR": 20e-3, "ESL": 2e-10},
         {"name": "C_1608_0.1u", "C": 0.1e-6, "ESR": 15e-3, "ESL": 3e-10},
@@ -126,7 +126,7 @@ class UserConfig:
     ])
     
     # 探索設定
-    max_total_parts: int = 10  # コンデンサ総数上限
+    max_total_parts: int = 8  # コンデンサ総数上限
     min_total_parts_ratio: float = 0.6  # 最小総数比率
     top_k: int = 15  # 上位候補数
     shuffle_evaluation: bool = True  # 評価順のシャッフル
@@ -134,14 +134,17 @@ class UserConfig:
     
     # スコア重み
     weight_max: float = 0.6
-    weight_area: float = 1.0
+    weight_area: float = 2.0
     weight_mean: float = 0.3
     weight_anti: float = 0.1
     weight_flat: float = 0.1
     weight_under: float = -0.1
     weight_parts: float = 0.1
-    weight_num_types: float = 0.2
+    weight_num_types: float = 2.0
     weight_resonance: float = 0.1
+    weight_improvement: float = 1.0
+    weight_low_improvement: float = 2.0
+    low_improvement_threshold: float = 0.15
     weight_mc_worst: float = 1.0
     ignore_safe_anti_resonance: bool = False
     
@@ -436,6 +439,9 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
                 "weight_parts",
                 "weight_num_types",
                 "weight_resonance",
+                "weight_improvement",
+                "weight_low_improvement",
+                "low_improvement_threshold",
                 "weight_mc_worst",
                 "ignore_safe_anti_resonance"
             ],
