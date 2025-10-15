@@ -1259,7 +1259,6 @@ def create_zpdn_chart() -> alt.Chart:
     # X軸のスケール設定(domainで範囲を固定)
     x_scale = alt.Scale(type='log', base=10, domain=[f_min, f_max])
 
-    # ベースチャート（configure前の状態）
     chart = alt.Chart(df).mark_line(clip=True).encode(
         x=alt.X(
             'Frequency:Q',

@@ -245,6 +245,7 @@ def _pdn_impedance_core(
     y_total[:] = y_vrm
 
     # ラダー回路の計算（逆順）
+    z_sN = parasitic_elements['z_sN']
     for cap_idx in range(n_caps - 1, -1, -1):
         # 使用されているコンデンサのインデックスを取得
         idx = xp.where(count_vectors[:, cap_idx] > 0)[0]
@@ -260,11 +261,11 @@ def _pdn_impedance_core(
         inv_z_cm = safe_divide(1.0, z_with_mount[idx, cap_idx, :], fill_value=0.0, xp=xp)
         y_cm = counts[:, xp.newaxis] * inv_z_cm
 
-        # 直列インピーダンス
-        z_series = parasitic_elements['z_sN'] + safe_divide(1.0, y_cm, fill_value=0.0, xp=xp)
-
-        # トータルアドミタンスに追加（インプレース）
-        y_total[idx] += safe_divide(1.0, z_series, fill_value=0.0, xp=xp)
+        # VRM側からラダーを逆順に合成
+        y_equiv = y_total[idx] + y_cm
+        z_parallel = safe_divide(1.0, y_equiv, fill_value=0.0, xp=xp)
+        z_with_series = z_sN + z_parallel
+        y_total[idx] = safe_divide(1.0, z_with_series, fill_value=0.0, xp=xp)
 
     # プレーナ容量を追加
     y_with_planar = y_total + parasitic_elements['y_p']
