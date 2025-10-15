@@ -1260,7 +1260,7 @@ def create_zpdn_chart() -> alt.Chart:
     x_scale = alt.Scale(type='log', base=10, domain=[f_min, f_max])
 
     # ベースチャート（configure前の状態）
-    base_chart = alt.Chart(df).mark_line(clip=True).encode(
+    chart = alt.Chart(df).mark_line(clip=True).encode(
         x=alt.X(
             'Frequency:Q',
             scale=x_scale,
@@ -1294,34 +1294,7 @@ def create_zpdn_chart() -> alt.Chart:
         width=800,
         height=450,
         title='PDN Impedance Characteristics'
-    )
-
-    # 評価帯域（または目標インピーダンス帯域）を示す縦線破線を追加
-    eval_f_L, eval_f_H = config.f_L, config.f_H
-    # カスタムマスクモードの時のみカスタムマスクの帯域を使用
-    if config.target_impedance_mode == "custom" and config.z_custom_mask:
-        custom_f_L, custom_f_H = get_custom_mask_freq_range(config.z_custom_mask)
-        if custom_f_L is not None and custom_f_H is not None:
-            eval_f_L, eval_f_H = custom_f_L, custom_f_H
-
-    # 縦線破線のデータ（下限と上限）
-    vline_data = pd.DataFrame({
-        'Frequency': [eval_f_L, eval_f_H],
-        'Label': ['Eval Band Start', 'Eval Band End']
-    })
-
-    # 縦線破線チャート
-    vlines = alt.Chart(vline_data).mark_rule(
-        strokeDash=[4, 4],
-        color=TARGET_MASK_COLOR,
-        opacity=0.7,
-        size=1.5
-    ).encode(
-        x='Frequency:Q'
-    )
-
-    # レイヤー化してから configure と interactive を適用
-    chart = (base_chart + vlines).configure_axis(
+    ).configure_axis(
         gridOpacity=0.5
     ).interactive()
 
