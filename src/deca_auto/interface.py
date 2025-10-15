@@ -1189,14 +1189,18 @@ def create_zpdn_chart() -> alt.Chart:
 
     if target_mask is not None:
         target_np = ensure_numpy(target_mask)
-        f_lo, f_hi = None, None
-        if config.z_custom_mask:
-            f_lo, f_hi = get_custom_mask_freq_range(config.z_custom_mask)
+        # 評価帯域と同じロジックでTarget Maskの描画範囲を決定
+        f_lo, f_hi = config.f_L, config.f_H
+        # カスタムマスクモードの時のみカスタムマスクの帯域を使用
+        if config.target_impedance_mode == "custom" and config.z_custom_mask:
+            custom_f_L, custom_f_H = get_custom_mask_freq_range(config.z_custom_mask)
+            if custom_f_L is not None and custom_f_H is not None:
+                f_lo, f_hi = custom_f_L, custom_f_H
 
         for j in indices_target:
             if j < len(target_np):
                 fval = float(f_grid_np[j])
-                if (f_lo is not None and fval < f_lo) or (f_hi is not None and fval > f_hi):
+                if fval < f_lo or fval > f_hi:
                     continue
                 data_list.append({
                     'Frequency': fval,
@@ -1255,7 +1259,8 @@ def create_zpdn_chart() -> alt.Chart:
     # X軸のスケール設定(domainで範囲を固定)
     x_scale = alt.Scale(type='log', base=10, domain=[f_min, f_max])
 
-    chart = alt.Chart(df).mark_line(clip=True).encode(
+    # ベースチャート（configure前の状態）
+    base_chart = alt.Chart(df).mark_line(clip=True).encode(
         x=alt.X(
             'Frequency:Q',
             scale=x_scale,
@@ -1289,7 +1294,34 @@ def create_zpdn_chart() -> alt.Chart:
         width=800,
         height=450,
         title='PDN Impedance Characteristics'
-    ).configure_axis(
+    )
+
+    # 評価帯域（または目標インピーダンス帯域）を示す縦線破線を追加
+    eval_f_L, eval_f_H = config.f_L, config.f_H
+    # カスタムマスクモードの時のみカスタムマスクの帯域を使用
+    if config.target_impedance_mode == "custom" and config.z_custom_mask:
+        custom_f_L, custom_f_H = get_custom_mask_freq_range(config.z_custom_mask)
+        if custom_f_L is not None and custom_f_H is not None:
+            eval_f_L, eval_f_H = custom_f_L, custom_f_H
+
+    # 縦線破線のデータ（下限と上限）
+    vline_data = pd.DataFrame({
+        'Frequency': [eval_f_L, eval_f_H],
+        'Label': ['Eval Band Start', 'Eval Band End']
+    })
+
+    # 縦線破線チャート
+    vlines = alt.Chart(vline_data).mark_rule(
+        strokeDash=[4, 4],
+        color=TARGET_MASK_COLOR,
+        opacity=0.7,
+        size=1.5
+    ).encode(
+        x='Frequency:Q'
+    )
+
+    # レイヤー化してから configure と interactive を適用
+    chart = (base_chart + vlines).configure_axis(
         gridOpacity=0.5
     ).interactive()
 

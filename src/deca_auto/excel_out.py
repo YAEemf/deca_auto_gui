@@ -205,7 +205,8 @@ def write_detail_sheet(worksheet, results: Dict, config: UserConfig,
     
     # 評価帯域マスク再構築
     eval_f_L, eval_f_H = config.f_L, config.f_H
-    if config.z_custom_mask:
+    # カスタムマスクモードの時のみカスタムマスクの帯域を評価帯域として使用
+    if config.target_impedance_mode == "custom" and config.z_custom_mask:
         custom_f_L, custom_f_H = get_custom_mask_freq_range(config.z_custom_mask)
         if custom_f_L is not None and custom_f_H is not None:
             eval_f_L, eval_f_H = custom_f_L, custom_f_H
@@ -329,7 +330,8 @@ def write_impedance_data(worksheet, results: Dict, config: UserConfig, header_fo
 
     # 評価帯域の計算（Target Mask表示制御用）
     eval_f_L, eval_f_H = config.f_L, config.f_H
-    if config.z_custom_mask:
+    # カスタムマスクモードの時のみカスタムマスクの帯域を評価帯域として使用
+    if config.target_impedance_mode == "custom" and config.z_custom_mask:
         custom_f_L, custom_f_H = get_custom_mask_freq_range(config.z_custom_mask)
         if custom_f_L is not None and custom_f_H is not None:
             eval_f_L, eval_f_H = custom_f_L, custom_f_H

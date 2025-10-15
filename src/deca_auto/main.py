@@ -550,12 +550,12 @@ def run_optimization(config: UserConfig,
     # 評価帯域マスク生成
     eval_f_L, eval_f_H = config.f_L, config.f_H
 
-    # カスタムマスク使用時は評価帯域を更新
-    if config.z_custom_mask:
+    # カスタムマスクモードの時のみカスタムマスクの帯域を評価帯域として使用
+    if config.target_impedance_mode == "custom" and config.z_custom_mask:
         custom_f_L, custom_f_H = get_custom_mask_freq_range(config.z_custom_mask)
         if custom_f_L is not None and custom_f_H is not None:
             eval_f_L, eval_f_H = custom_f_L, custom_f_H
-            logger.info(f"カスタムマスクによる評価帯域: {eval_f_L:.2e} - {eval_f_H:.2e} Hz")
+            logger.info(f"カスタムマスクモードによる評価帯域: {eval_f_L:.2e} - {eval_f_H:.2e} Hz")
 
     eval_mask = create_evaluation_mask(f_grid, eval_f_L, eval_f_H, xp)
     logger.info(f"評価帯域内の周波数点数: {xp.sum(eval_mask)}")
