@@ -2,6 +2,8 @@
 /src/deca_auto/src/__pycache__
 *.pyc
 *.xlsx
+*.pptx
+*.docx
 *.cir
 *.mod
-*.pptx
+*.CKT
