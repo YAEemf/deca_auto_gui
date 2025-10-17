@@ -427,10 +427,15 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
             if spice_path.suffix == '':
                 candidates.extend([
                     spice_path.with_suffix('.mod'),
-                    spice_path.with_suffix('.MOD')
+                    spice_path.with_suffix('.MOD'),
+                    spice_path.with_suffix('.ckt'),
+                    spice_path.with_suffix('.CKT')
                 ])
-            elif spice_path.suffix.lower() != '.mod':
-                candidates.append(spice_path.with_suffix('.mod'))
+            elif spice_path.suffix.lower() not in ['.mod', '.ckt']:
+                candidates.extend([
+                    spice_path.with_suffix('.mod'),
+                    spice_path.with_suffix('.CKT')
+                ])
 
             for candidate in candidates:
                 if candidate.exists():
