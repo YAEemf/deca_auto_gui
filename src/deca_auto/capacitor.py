@@ -112,12 +112,12 @@ def simulate_ac_impedance(model_path: Path, f_grid: np.ndarray,
             'Iac',
             circuit.gnd,  # negative
             n1,  # positive
-            # dc_offset=dc_bias@u_A,
-            # amplitude=1@u_A,
-            frequency=100@u_kHz,
-            delay=0@u_s,
+            # dc_offset=dc_bias,
+            # amplitude=1,
+            frequency=100e3,
+            delay=0,
             damping_factor=0,
-            ac_magnitude=1@u_A
+            ac_magnitude=1
         )
         
         # DUTをサブサーキットとして接続
@@ -125,8 +125,8 @@ def simulate_ac_impedance(model_path: Path, f_grid: np.ndarray,
         
         # DCバイアス電圧源（必要な場合）
         if dc_bias > 0:
-            circuit.V('bias', 'vbias', circuit.gnd, dc_bias@u_V)
-            circuit.R('bias', 'vbias', n1, 1@u_MOhm)  # 高抵抗でDCバイアスを印加
+            circuit.V('bias', 'vbias', circuit.gnd, dc_bias)
+            circuit.R('bias', 'vbias', n1, 1e6)  # 高抵抗でDCバイアスを印加
         
         # シミュレータ作成
         simulator = circuit.simulator(temperature=25, nominal_temperature=25)
@@ -139,8 +139,8 @@ def simulate_ac_impedance(model_path: Path, f_grid: np.ndarray,
         points_per_decade = len(f_grid) / np.log10(f_max / f_min)
         
         analysis = simulator.ac(
-            start_frequency=f_min@u_Hz,
-            stop_frequency=f_max@u_Hz,
+            start_frequency=f_min,
+            stop_frequency=f_max,
             number_of_points=len(f_grid),
             variation='dec'  # 対数スケール
         )
