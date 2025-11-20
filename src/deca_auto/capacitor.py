@@ -148,8 +148,85 @@ def simulate_ac_impedance(model_path: Path, f_grid: np.ndarray,
         # 結果取得
         freq = np.array([float(f) for f in analysis.frequency])
         # V(n1) / I = Z (I=1Aなので V=Z)
-        voltage = analysis[n1].as_ndarray()
-        z_complex = voltage  # 1Aの電流源なので電圧=インピーダンス
+        # PySpiceの単位付きオブジェクトから複素数を安全に取得
+        # 注意: as_ndarray()はデフォルトでscale=Falseのため、単位のスケールが適用されない
+        # また、PySpiceの単位付きオブジェクトをcomplex()で直接変換すると虚数部が失われる
+        raw_waveform = analysis[n1]
+
+        # デバッグ: PySpice単位情報をログ出力
+        if hasattr(raw_waveform, '_prefixed_unit'):
+            try:
+                prefixed_unit = raw_waveform._prefixed_unit
+                scale_value = prefixed_unit.power.scale if hasattr(prefixed_unit, 'power') else 'N/A'
+                unit_name = str(prefixed_unit) if prefixed_unit else 'N/A'
+                logger.debug(f"PySpice単位情報: unit={unit_name}, scale={scale_value}")
+            except Exception as e:
+                logger.debug(f"単位情報取得エラー: {e}")
+
+        # 実部と虚部を別々に取得して複素数配列を構築
+        # これにより、単位変換の問題とcomplex()変換の問題を回避
+        try:
+            # as_ndarray(scale=True)でスケールを適用して取得
+            voltage_array = raw_waveform.as_ndarray(scale=True)
+
+            # デバッグ: 変換後の値の範囲をログ出力
+            logger.debug(
+                f"as_ndarray(scale=True) 結果: "
+                f"dtype={voltage_array.dtype}, shape={voltage_array.shape}, "
+                f"min_abs={np.min(np.abs(voltage_array)):.2e}, "
+                f"max_abs={np.max(np.abs(voltage_array)):.2e}"
+            )
+
+            # 複素数型を保持しているか確認
+            if not np.iscomplexobj(voltage_array):
+                # 複素数でない場合は、実部・虚部を別々に処理
+                # PySpiceのWaveformArrayはNumPy配列のサブクラスなので
+                # .real と .imag で実部・虚部にアクセス可能
+                real_part = np.real(raw_waveform.as_ndarray(scale=True))
+                imag_part = np.imag(raw_waveform.as_ndarray(scale=True))
+                z_complex = real_part + 1j * imag_part
+            else:
+                z_complex = voltage_array
+
+        except Exception as e:
+            logger.warning(f"スケール適用に失敗、フォールバック処理を実行: {e}")
+            # フォールバック: 要素ごとに変換（遅いが確実）
+            # 実部と虚部を明示的にfloatに変換して複素数を構築
+            z_list = []
+            for v in raw_waveform:
+                # PySpiceの単位付き値から実部と虚部を取得
+                if hasattr(v, 'real') and hasattr(v, 'imag'):
+                    re = float(v.real) if hasattr(v.real, '__float__') else float(np.real(v))
+                    im = float(v.imag) if hasattr(v.imag, '__float__') else float(np.imag(v))
+                else:
+                    # スカラー値の場合
+                    re = float(np.real(v))
+                    im = float(np.imag(v))
+                z_list.append(complex(re, im))
+            z_complex = np.array(z_list)
+
+        # 結果の検証と警告
+        max_abs = np.max(np.abs(z_complex))
+        if max_abs < 1e-15:
+            logger.warning(
+                f"インピーダンス値が異常に小さい (max={max_abs:.2e}). "
+                "PySpice単位変換の問題の可能性があります。"
+            )
+            # 代替アプローチ: scale=Falseで取得し、手動でスケールを調べる
+            try:
+                voltage_unscaled = raw_waveform.as_ndarray(scale=False)
+                max_unscaled = np.max(np.abs(voltage_unscaled))
+                logger.warning(
+                    f"scale=False での値: max={max_unscaled:.2e}. "
+                    f"スケール比: {max_unscaled / max_abs if max_abs > 0 else 'N/A'}"
+                )
+                # もしscale=Falseの値が妥当な範囲（1e-6〜1e3 Ω程度）であれば
+                # スケールが逆に適用されている可能性があるため、unscaled値を使用
+                if 1e-6 <= max_unscaled <= 1e3:
+                    logger.info("scale=False の値を使用します（妥当な範囲内）")
+                    z_complex = voltage_unscaled.astype(np.complex128)
+            except Exception as e:
+                logger.warning(f"代替アプローチ失敗: {e}")
         
         # 周波数グリッドに補間（必要な場合）
         if len(freq) != len(f_grid) or not np.allclose(freq, f_grid, rtol=1e-3):
