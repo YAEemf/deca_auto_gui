@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75", "wheel"]
+requires = ["setuptools>=82.0.1", "wheel>=0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,25 +13,25 @@ authors = [
     {name = "YAE", email = "yae@example.com"}
 ]
 dependencies = [
-    "numpy>=2.2.6,<3.0",
-    "pandas>=2.3",
-    "cupy-cuda12x>=13.6",
+    "numpy>=2.0,<2.3",
+    "pandas>=3.0.3",
+    "cupy-cuda12x>=14.1.1",
     "pyspice>=1.5",
-    "scikit-rf>=1.8,<2.0",
-    "scipy>=1.16",
-    "streamlit>=1.50,<2.0",
-    "altair>=5.5",
-    "xlsxwriter>=3.2.9,<4.0",
-    "tqdm>=4.67,<5.0",
-    "tomlkit>=0.13"
+    "scikit-rf>=1.12.0",
+    "scipy>=1.17.1",
+    "streamlit>=1.58.0",
+    "altair>=6.2.1",
+    "xlsxwriter>=3.2.9",
+    "tqdm>=4.68.1",
+    "tomlkit>=0.12.0,<0.15.0"
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "black>=24.0",
-    "mypy>=1.8",
-    "ruff>=0.3"
+    "pytest>=9.0.3",
+    "black>=26.5.1",
+    "mypy>=2.1.0",
+    "ruff>=0.15.16"
 ]
 
 [project.scripts]
