@@ -7,7 +7,7 @@
 旧CLI版(https://github.com/YAEemf/deca_auto.git) より大幅に機能/探索速度/評価精度が向上しています。  
 **NVIDIA GPU無しでも動くようにしました！--force-numpyを指定してください。**
 
-!["実行時スクショ"](Screenshot_main.png)
+!["実行時スクショ"](images/Screenshot_main.png)
 ---
 
 ## 概要
@@ -15,7 +15,7 @@
 - コンデンサの基本パラメータ（C / ESR / ESL）を自分で定義して利用可能
 - 実装したPDN（組み合わせにおけるコンデンサは常にLoad側から容量が小さい順に並ぶ）
 
-![""](PDN.jpg)
+![""](images/PDN.jpg)
 
 ## 動作環境
 Python 3.12+  
@@ -67,7 +67,7 @@ bash run.sh --no-gui --config config.toml
 
 ### 2. コンデンサ設定方法（全ての数値は指数表記に対応）
 コンデンサリスト：
-![""](Cap_list.png)
+![""](images/Cap_list.png)
 
 - **SPICEモデルを利用する** 
   `.mod` ファイルパス（modelディレクトリ内のモデルはファイル名のみでOK）をGUIのリストまたは `.tomlファイル` に定義。SPICEモデルを指定時は C / ESR / ESL の指定は不要です。名前を省略した場合、自動でファイル名を使います。
@@ -89,7 +89,7 @@ bash run.sh --no-gui --config config.toml
 `未指定`（デフォルト。0～全体の上限個数）
 
 ### 3. 探索設定
-![""](Search_Tab.png)  
+![""](images/Search_Tab.png)  
 `Max total parts`：探索する組み合わせの`最大部品数`  
 `Min total parts ratio`：高速化のために`最大部品数`に対してこの比率未満の部品数の組み合わせを探索から除外します。  
 `Top-k`：保持する組み合わせの上位候補数
@@ -99,7 +99,7 @@ bash run.sh --no-gui --config config.toml
 各評価項目を個別に算出し、それぞれに対応する`重み`を乗算した数値の総和を`スコア`として扱います。Deca-Autoではより小さい`スコア`を求めて探索します。つまり、重みを増やすとその評価項目に対する影響が大きくなり、自然とその特性に対して優れた組み合わせが最終的に残ります。  
 
 **重みは探索において重要なパラメーターです。それぞれの重みを調整する事で所望のインピーダンス特性を持つ組み合わせを得る事ができます。**  
-![""](Weights.png)  
+![""](images/Weights.png)  
 
 **それぞれの重みを`大きく`した時の挙動**  
 - `Max`：インピーダンスの`最大値`が低い候補が現れやすくなる
@@ -121,7 +121,7 @@ bash run.sh --no-gui --config config.toml
 ### 4. 結果
 PDNのインピーダンス特性グラフはマウスのホイールを回すと拡大/縮小できます。ダブルクリックでズーム解除  
 
-![""](Zoom.png)
+![""](images/Zoom.png)
 
 ---
 
