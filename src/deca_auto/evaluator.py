@@ -25,7 +25,7 @@ def calculate_score_components_batch(
         - max: 最大インピーダンス比
         - area: 目標超過面積（台形積分）
         - mean: 平均インピーダンス比（対数周波数重み付き）
-        - anti: アンチレゾナンス（ピークの高さと鋭さを考慮）
+        - anti: 反共振（ピークの高さと鋭さを考慮）
         - flat: 平滑さ（対数周波数での重み付き変動係数）
         - under: 目標未達面積（負の重みで良い特性として評価）
         - parts: 部品数（正規化）
@@ -151,7 +151,7 @@ def calculate_score_components_batch(
     score_area = xp.minimum(score_area, 50.0)
     score_under = xp.minimum(score_under, 50.0)
 
-    # アンチレゾナンス評価（ピークの高さと鋭さを考慮）
+    # 反共振評価（ピークの高さと鋭さを考慮）
     if n_eval > 2:
         center = ratio_clipped[:, 1:-1]
         left = ratio_clipped[:, :-2]

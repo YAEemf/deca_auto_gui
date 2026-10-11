@@ -662,7 +662,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
     """
     texts = {
         "jp": {
-            "title": "Deca Auto【PDN自動最適化ツール】",
+            "title": "Deca Auto",
             "start_search": "探索開始",
             "stop_search": "停止",
             "settings": "設定",
@@ -680,7 +680,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "weights": "評価重み",
             "weight_num_types": "種類数の重み",
             "weight_resonance": "共振ペナルティの重み",
-            "ignore_safe_anti": "目標以下のアンチレゾナンスを無視",
+            "ignore_safe_anti": "目標以下の反共振を無視",
             "reset_weights": "重みをリセット",
             "calculate_zc_only": "|Z_c|計算",
             "use_custom_mask": "カスタムマスクを使用",

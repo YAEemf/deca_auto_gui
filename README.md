@@ -3,7 +3,7 @@
 **Deca-Auto: Automated Optimization of Decoupling Capacitor Combinations in PDN**
 
 `デカップリングコンデンサ`の組み合わせ最適解を自動探索するツールです。  
-定義されたコンデンサの中から、アンチレゾナンスの少ない優れた合成インピーダンスを持つ組み合わせを自動で探索します。  
+定義されたコンデンサの中から、反共振の少ない優れた合成インピーダンスを持つ組み合わせを自動で探索します。  
 旧CLI版(https://github.com/YAEemf/deca_auto.git) より大幅に機能/探索速度/評価精度が向上しています。  
 **NVIDIA GPU無しでも動くようにしました！--force-numpyを指定してください。**
 
@@ -19,24 +19,41 @@
 
 ## 動作環境
 Python 3.12+  
-(GPUを使う場合は) CUDA 12.x
+(GPUを使う場合は) NVIDIA RTX 20シリーズ以降のGPUと、バージョン580以降のドライバ
 
 ## 使い方
 ### 1. 実行方法
 #### インストール
+
+Windows：`install.bat` を実行
+
+Linux：
 ```bash
-python -m pip install -e .
+bash install.sh
 ```
+CuPy（`cupy-cuda13x`）とCUDAランタイムも一緒にインストールされます。GPU無し、または初期化に失敗するとNumPyで動作します。  
+
 #### 通常起動
+Windows：`run.bat` を実行
+
+Linux：
 ```bash
-python -m deca_auto
+bash run.sh
 ```
 デフォルトでは http://localhost:8501 でWebアプリが立ち上がります。
 
 #### CLI（tomlを渡さない場合はconfig.pyのデフォルト値で探索）
+起動スクリプトにオプションを渡します。
+
+Windows
+```bat
+.\run.bat --no-gui --config config.toml
+```
+Linux
 ```bash
-python -m deca_auto --no-gui --config config.toml
-```  
+bash run.sh --no-gui --config config.toml
+```
+
 **複数のtomlが渡された場合はそれぞれの条件で順番に探索を実行します。**
 ```bash
 --config confg1.toml config2.toml ...

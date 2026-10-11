@@ -70,13 +70,13 @@ weight_max = 0.3        # 最大値（評価帯域内での最大値）
 weight_area = 1.0       # 目標マスクに対する超過面積
 weight_under = 0.1      # 目標マスクに対する不足面積
 weight_mean = 0.2       # 平均値
-weight_anti = 0.3       # アンチレゾナンス（反共振によるピーク）
-weight_resonance = 0.1  # レゾナンス（共振による急峻な谷）
+weight_anti = 0.3       # 反共振によるピーク
+weight_resonance = 0.1  # 共振による急峻な谷
 weight_flat = 0.0       # 平滑さ
 weight_parts = 0.1      # 部品点数
 weight_num_types = 0.1  # 組み合わせにおける部品の種類数
 weight_mc_worst = 1.0   # Monte Carlo最悪値（部品特性のバラつきを考慮。常に1.0で良いかと）
-ignore_safe_anti_resonance = false  # 目標マスク以下におけるアンチレゾナンスを無視
+ignore_safe_anti_resonance = false  # 目標マスク以下における反共振を無視
 
 [monte_carlo]
 # Monte Carlo設定
