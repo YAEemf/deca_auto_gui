@@ -71,8 +71,8 @@ weight_mean = 0.3       # 平均：目標比の帯域平均（目標の1/2以下
 weight_anti = 0.5       # 反共振：ピークの突出量（プロミネンス）の合計
 weight_resonance = 0.1  # 共振の谷：急峻な谷の深さの合計
 weight_flat = 0.1       # 平坦さ：目標比の加重標準偏差
-weight_parts = 0.5      # 部品点数：総数 / 10
-weight_num_types = 0.5  # 種類数：種類数 / 5
+weight_parts = 0.1      # 部品点数：総数 / 10
+weight_num_types = 0.25 # 種類数：種類数 / 5
 weight_mc_worst = 1.0   # Monte Carlo最悪時のインピーダンス評価の悪化量
 ignore_safe_anti_resonance = true   # 目標以下の反共振/谷を無視
 

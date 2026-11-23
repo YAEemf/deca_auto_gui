@@ -139,8 +139,8 @@ class UserConfig:
     weight_anti: float = 0.5        # 反共振ピークの突出量
     weight_resonance: float = 0.1   # 直列共振による急峻な谷の深さ
     weight_flat: float = 0.1        # 目標比の平坦さ（加重標準偏差）
-    weight_parts: float = 0.5       # 部品点数
-    weight_num_types: float = 0.5   # 部品の種類数
+    weight_parts: float = 0.1       # 部品点数（性能優先: 上限まで使う候補が上位に残る程度の弱いコスト）
+    weight_num_types: float = 0.25  # 部品の種類数
     weight_mc_worst: float = 1.0    # Monte Carlo最悪時のインピーダンス成分の悪化量
     ignore_safe_anti_resonance: bool = True  # 目標以下の反共振/谷を無視（目標を満たすピークを減衰させるための過剰なバルク容量を避ける）
     
