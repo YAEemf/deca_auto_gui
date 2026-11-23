@@ -46,7 +46,7 @@ WITHOUT_DECAP_COLOR = "#018786"
 
 CAP_COLUMNS = {
     "name": "Name", "path": "Path", "C": "C [F]", "ESR": "ESR [Ω]",
-    "ESL": "ESL [H]", "L_mnt": "L_mnt [H]",
+    "ESL": "ESL [H]", "L_mnt": "L_mnt [H]", "derating": "Derating",
 }
 CAP_EDITOR_KEY = "settings_config_capacitors_data_editor"
 MASK_EDITOR_KEY = "settings_config_target_data_editor_custom"

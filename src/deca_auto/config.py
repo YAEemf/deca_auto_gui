@@ -47,6 +47,7 @@ class CapacitorConfig:
     L_mnt: Optional[float] = 0.5e-9  # マウントインダクタンス [H]
     MIN: Optional[int] = None   # 最小使用数
     MAX: Optional[int] = None   # 最大使用数
+    derating: Optional[float] = None  # Monte Carloの容量ディレーティング（未指定は mlcc_derating。ポリマー/電解など DCバイアス特性の無い部品は0）
 
 
 @dataclass
@@ -149,7 +150,7 @@ class UserConfig:
     tol_C: float = 0.15  # 容量公差
     tol_ESR: float = 0.15  # ESR公差
     tol_ESL: float = 0.15  # ESL公差
-    mlcc_derating: float = 0.15  # MLCCディレーティング
+    mlcc_derating: float = 0.15  # MLCCディレーティング（derating を個別指定していないコンデンサに適用）
     
     # システム設定
     seed: int = 1234  # 乱数シード
@@ -229,7 +230,7 @@ def _load_config_field(config: UserConfig, key: str, value: Any) -> None:
             for k, v in cap_data.items():
                 v_unwrapped = unwrap_toml_value(v)
 
-                if k in ["C", "ESR", "ESL", "L_mnt"]:
+                if k in ["C", "ESR", "ESL", "L_mnt", "derating"]:
                     if isinstance(v_unwrapped, str):
                         cap_dict[k] = parse_scientific_notation(v_unwrapped)
                     elif v_unwrapped is not None:
@@ -519,6 +520,8 @@ def validate_config(config: UserConfig) -> bool:
                 assert float(max_val) >= 0, f"コンデンサ[{i}]の最大使用数は0以上である必要があります"
             if min_val is not None and max_val is not None:
                 assert float(max_val) >= float(min_val), f"コンデンサ[{i}]の最大使用数は最小使用数以上である必要があります"
+            if cap.get("derating") is not None:
+                assert 0 <= float(cap["derating"]) < 1, f"コンデンサ[{i}]のディレーティングは0以上1未満である必要があります"
 
         # 評価重みの検証
         minimum, maximum, _ = WEIGHT_RANGE

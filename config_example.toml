@@ -83,7 +83,7 @@ mc_samples = 64
 tol_C = 0.15    # 容量公差
 tol_ESR = 0.15  # ESR公差
 tol_ESL = 0.15  # ESL公差
-mlcc_derating = 0.15    # MLCCディレーティング
+mlcc_derating = 0.15    # MLCCディレーティング（derating を個別指定していないコンデンサに適用）
 
 [system]
 # システム設定
@@ -113,6 +113,7 @@ C = 0.1e-6
 ESR = 15e-3
 ESL = 2e-10
 L_mnt = 0.2e-10
+# derating = 0.3  # 任意: Monte Carloの容量ディレーティング（未指定は mlcc_derating。ポリマー/電解は 0）
 
 # SPICEモデルを使用する場合の例
 # [[capacitors]]

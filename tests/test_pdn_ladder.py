@@ -122,6 +122,20 @@ def test_monte_carlo_derating_equals_reduced_capacitance(xp):
     assert np.max(np.abs(mc[0, 0] - ref) / np.abs(ref)) < 1e-9
 
 
+@pytest.mark.parametrize("xp", BACKENDS, ids=lambda m: m.__name__)
+def test_monte_carlo_per_capacitor_derating(xp):
+    """derating を個別指定した部品（ポリマー/電解など）は mlcc_derating ではなく個別値で縮む"""
+    cfg = _config(tol_C=0.0, tol_ESR=0.0, tol_ESL=0.0, mlcc_derating=0.2)
+    cfg.capacitors[1]["derating"] = 0.5
+    cfg.capacitors[3]["derating"] = 0.0
+    scale = [0.8, 0.5, 0.8, 1.0]
+    for counts in (COUNTS[3], COUNTS[4]):
+        mc = _to_host(pdn.calculate_pdn_impedance_monte_carlo(
+            xp.asarray(np.array([counts], np.int32)), _prepare(xp, cfg), cfg, 2, xp))
+        ref = _mna(cfg, counts, [dict(c, C=c["C"] * k) for c, k in zip(CAPS, scale)])
+        assert np.max(np.abs(mc[0, 1] - ref) / np.abs(ref)) < 1e-9, counts
+
+
 def test_monte_carlo_is_backend_and_batch_independent():
     """同じ組み合わせは、バッチ内の位置やバックエンドに依らず同じ公差サンプルになる"""
     cfg = _config()

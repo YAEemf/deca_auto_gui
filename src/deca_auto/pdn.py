@@ -92,7 +92,7 @@ def prepare_pdn_components(
 
     Returns:
         'cap_names', 'z_c'(T,F), 'z_mnt'(T,F), 'y_cm'(T,F), 'parasitic', 'omega',
-        'dtype', 'C_nom'(T,), 'ESL_nom'(T,)
+        'dtype', 'C_nom'(T,), 'ESL_nom'(T,), 'derating'(T,)（ホストnp配列。未指定は mlcc_derating）
     """
     target = _as_complex_dtype(dtype if dtype is not None else config.dtype_c)
     cap_names = tuple(capacitor_impedances.keys())
@@ -107,9 +107,12 @@ def prepare_pdn_components(
     cap_cfg = {cap.get('name'): cap for cap in config.capacitors}
     default_l_mnt = float(config.L_mntN)
     l_mnt = []
+    derating = []
     for name in cap_names:
         value = cap_cfg.get(name, {}).get('L_mnt')
         l_mnt.append(default_l_mnt if value is None else float(value))
+        value = cap_cfg.get(name, {}).get('derating')
+        derating.append(float(config.mlcc_derating) if value is None else float(value))
     l_mnt_arr = xp.asarray(l_mnt, dtype=omega.dtype)
     z_mnt = (1j * omega[None, :] * l_mnt_arr[:, None]).astype(target)
 
@@ -129,6 +132,7 @@ def prepare_pdn_components(
         'dtype': target,
         'C_nom': xp.asarray(c_nom, dtype=omega.dtype),
         'ESL_nom': xp.asarray(esl_nom, dtype=omega.dtype),
+        'derating': np.asarray(derating, dtype=np.float64),
     }
 
 
@@ -272,13 +276,14 @@ def calculate_pdn_impedance_batch(
 
 
 def _tolerance_factors(counts_host: np.ndarray, n_samples: int, config: UserConfig,
-                       seed: int) -> np.ndarray:
+                       seed: int, derating: np.ndarray) -> np.ndarray:
     """
     公差倍率 (3, max_stages, K*n_samples) = (k_C, k_R, k_L) をホストで生成する
 
     乱数は組み合わせごとに (seed, カウントベクトル) から初期化するため、バックエンド
     （NumPy/CuPy）、チャンク分割、評価順のシャッフルに依らず同じ組み合わせは同じ結果になる。
-    各倍率は平均1、3σ=公差の正規分布を ±公差 でクリップしたもの。k_C にはディレーティングを含む。
+    各倍率は平均1、3σ=公差の正規分布を ±公差 でクリップしたもの。k_C には段の部品の
+    ディレーティング derating[種類]（(T,)）を含む。段はVRM側（容量の大きい種類）から数える。
     """
     tolerances = (float(config.tol_C), float(config.tol_ESR), float(config.tol_ESL))
     n_combo = counts_host.shape[0]
@@ -292,7 +297,8 @@ def _tolerance_factors(counts_host: np.ndarray, n_samples: int, config: UserConf
             if tol > 0:
                 values = rng.normal(1.0, tol / 3.0, size=(int(n_stages[i]), n_samples))
                 factors[j, :n_stages[i], cols] = np.clip(values, 1.0 - tol, 1.0 + tol)
-    factors[0] *= 1.0 - float(config.mlcc_derating)
+        stage_types = np.repeat(np.arange(row.size)[::-1], row[::-1])
+        factors[0, :n_stages[i], cols] *= (1.0 - derating[stage_types])[:, None]
     return factors
 
 
@@ -309,12 +315,13 @@ def calculate_pdn_impedance_monte_carlo(
 
     各コンデンサ（段）ごとに独立に C/ESR/ESL の倍率をサンプリングし、
     Z_c' = k_R·Re(Z_c) + j·(Im(Z_c) + ωESL(k_L − 1) − (1/(ωC))·(1/(k_C(1 − derating)) − 1))
+    （derating は部品ごと。prepared['derating']）
     として部品単体のインピーダンスを摂動させる（ESL, C は prepared の等価値）。
 
     Args:
         count_vectors: (K, T) 評価する組み合わせ
         prepared: prepare_pdn_components の結果
-        config: ユーザー設定（tol_C, tol_ESR, tol_ESL, mlcc_derating, seed）
+        config: ユーザー設定（tol_C, tol_ESR, tol_ESL, seed）
         n_samples: 1組み合わせあたりのサンプル数
         xp: バックエンド
         seed: 乱数シード（既定は config.seed）
@@ -346,7 +353,11 @@ def calculate_pdn_impedance_monte_carlo(
 
     counts_host = transfer_to_host(counts)
     counts_rep = xp.repeat(counts, n_samples, axis=0)
-    factors = _tolerance_factors(counts_host, n_samples, config, config.seed if seed is None else seed)
+    derating = prepared.get('derating')
+    if derating is None:
+        derating = np.full(counts.shape[1], float(config.mlcc_derating))
+    factors = _tolerance_factors(counts_host, n_samples, config, config.seed if seed is None else seed,
+                                 np.asarray(derating, dtype=np.float64))
     k_c, k_r, k_l = transfer_to_device(factors.astype(real_dtype), xp)
 
     def stage_admittance(k: int, types_k: Any) -> Any:
