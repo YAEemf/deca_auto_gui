@@ -43,7 +43,7 @@ def test_anti_resonance_peak_prominence():
     bump = np.exp(-0.5 * ((log_f - 5.5) / 0.05) ** 2) * np.log10(2.0)
     below = 10e-3 * 0.25 * 10 ** bump   # 目標の1/4から+6dB（目標以下）
     above = 10e-3 * 0.9 * 10 ** bump    # 目標を超えるピーク
-    comps, _ = _components([below, above], [[1], [1]])
+    comps, _ = _components([below, above], [[1], [1]], ignore_safe_anti_resonance=False)
     np.testing.assert_allclose(comps["anti"], [1.0, 1.0], rtol=0.02)
     comps, _ = _components([below, above], [[1], [1]], ignore_safe_anti_resonance=True)
     assert comps["anti"][0] == 0.0 and comps["anti"][1] > 0.95
@@ -68,7 +68,7 @@ def test_wide_anti_resonance_is_detected():
     """1デケード以上の幅を持つ反共振（VRM-バルク間など）も突出量として評価される"""
     log_f = np.log10(F)
     wide = 10e-3 * 0.5 * 10 ** (np.exp(-0.5 * ((log_f - 5.5) / 0.6) ** 2) * np.log10(2.0))
-    comps, _ = _components([wide], [[1]])
+    comps, _ = _components([wide], [[1]], ignore_safe_anti_resonance=False)
     np.testing.assert_allclose(comps["anti"], [1.0], rtol=0.05)
 
 

@@ -142,7 +142,7 @@ class UserConfig:
     weight_parts: float = 0.5       # 部品点数
     weight_num_types: float = 0.5   # 部品の種類数
     weight_mc_worst: float = 1.0    # Monte Carlo最悪時のインピーダンス成分の悪化量
-    ignore_safe_anti_resonance: bool = False  # 目標以下の反共振/谷を無視
+    ignore_safe_anti_resonance: bool = True  # 目標以下の反共振/谷を無視（目標を満たすピークを減衰させるための過剰なバルク容量を避ける）
     
     # Monte Carlo設定
     mc_enable: bool = True
@@ -642,7 +642,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "weights": "評価重み",
             "ignore_safe_anti": "目標以下の反共振/谷を無視",
             "label_ignore_safe_anti_resonance": "目標以下の反共振/谷を無視",
-            "help_ignore_safe_anti_resonance": "目標インピーダンス以下の反共振ピークと共振の谷をスコアから除外します。",
+            "help_ignore_safe_anti_resonance": "目標インピーダンス以下の反共振ピークと共振の谷をスコアから除外します（既定で有効）。目標以下でも平坦な特性を優先したい場合は無効にするか、Flatnessの重みを上げてください。",
             "label_weight_max": "ピーク",
             "help_weight_max": "評価帯域内で最も目標に近い/超えた点の目標比（6dB以上下回ると0、目標ちょうどで1。目標超過は同じdB数のマージンの4倍の重さ）",
             "label_weight_area": "超過量",
@@ -709,7 +709,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "weights": "Evaluation Weights",
             "ignore_safe_anti": "Ignore peaks/dips under target",
             "label_ignore_safe_anti_resonance": "Ignore peaks/dips under target",
-            "help_ignore_safe_anti_resonance": "Exclude anti-resonance peaks and resonance dips below the target from scoring.",
+            "help_ignore_safe_anti_resonance": "Exclude anti-resonance peaks and resonance dips below the target from scoring (on by default). To favor a flat profile even below the target, turn this off or raise the Flatness weight.",
             "label_weight_max": "Peak",
             "help_weight_max": "Peak |Z|/target in the band (0 when 6 dB or more below target, 1 at target; exceeding the target costs 4x the same dB of margin)",
             "label_weight_area": "Excess",
