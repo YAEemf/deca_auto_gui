@@ -523,7 +523,7 @@ def validate_config(config: UserConfig) -> bool:
         # 評価重みの検証
         minimum, maximum, _ = WEIGHT_RANGE
         for name in WEIGHT_FIELDS:
-            assert minimum <= getattr(config, name) <= maximum, f"{name} は{minimum}–{maximum}の範囲である必要があります"
+            assert minimum <= getattr(config, name) <= maximum, f"{name} は{minimum}~{maximum}の範囲である必要があります"
 
         # 探索設定の検証
         assert config.max_total_parts > 0, "最大総数は正の値である必要があります"
@@ -641,15 +641,15 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "label_ignore_safe_anti_resonance": "目標以下の反共振/谷を無視",
             "help_ignore_safe_anti_resonance": "目標インピーダンス以下の反共振ピークと共振の谷をスコアから除外します。",
             "label_weight_max": "ピーク",
-            "help_weight_max": "評価帯域内で最も目標に近い/超えた点の目標比（6dB以上下回ると0、目標ちょうどで1）",
+            "help_weight_max": "評価帯域内で最も目標に近い/超えた点の目標比（6dB以上下回ると0、目標ちょうどで1。目標超過は同じdB数のマージンの4倍の重さ）",
             "label_weight_area": "超過量",
             "help_weight_area": "目標を超えた量の帯域平均（2倍超過が全帯域で続くと1）",
             "label_weight_mean": "平均",
             "help_weight_mean": "目標比の帯域平均（6dB以上下回る部分は0に飽和し、過剰な低インピーダンス化を評価しない）",
             "label_weight_anti": "反共振",
-            "help_weight_anti": "反共振ピークの周辺からの突出量の合計（6dB突出で1）",
+            "help_weight_anti": "反共振ピークの突出量（プロミネンス）の合計（6dB突出で1）。幅の広い反共振も検出",
             "label_weight_resonance": "共振の谷",
-            "help_weight_resonance": "直列共振による急峻な谷の深さの合計（6dBの谷で1）",
+            "help_weight_resonance": "直列共振による谷の深さの合計（6dBの谷で1）",
             "label_weight_flat": "平坦さ",
             "help_weight_flat": "目標比の帯域内ばらつき（加重標準偏差、6dBで1）",
             "label_weight_parts": "部品点数",
@@ -708,7 +708,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "label_ignore_safe_anti_resonance": "Ignore peaks/dips under target",
             "help_ignore_safe_anti_resonance": "Exclude anti-resonance peaks and resonance dips below the target from scoring.",
             "label_weight_max": "Peak",
-            "help_weight_max": "Peak |Z|/target in the band (0 when 6 dB or more below target, 1 at target)",
+            "help_weight_max": "Peak |Z|/target in the band (0 when 6 dB or more below target, 1 at target; exceeding the target costs 4x the same dB of margin)",
             "label_weight_area": "Excess",
             "help_weight_area": "Band average of the excess over target (1 = 2x over target across the band)",
             "label_weight_mean": "Mean",
@@ -716,7 +716,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "label_weight_anti": "Anti-resonance",
             "help_weight_anti": "Sum of anti-resonance peak prominences (1 = 6 dB)",
             "label_weight_resonance": "Resonance dip",
-            "help_weight_resonance": "Sum of sharp series-resonance dip depths (1 = 6 dB)",
+            "help_weight_resonance": "Sum of series-resonance dip depths (1 = 6 dB)",
             "label_weight_flat": "Flatness",
             "help_weight_flat": "Weighted std of |Z|/target in the band (1 = 6 dB)",
             "label_weight_parts": "Parts",

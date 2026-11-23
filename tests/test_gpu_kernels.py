@@ -42,7 +42,7 @@ def test_score_components_match_numpy(cp, dtype, ignore_safe, n_eval, monkeypatc
     def unexpected_fallback(*args, **kwargs):
         pytest.fail("The array-based extrema calculation ran on CUDA")
 
-    monkeypatch.setattr(evaluator, "_sliding_extreme", unexpected_fallback)
+    monkeypatch.setattr(evaluator, "_extremum_excursion", unexpected_fallback)
     actual = evaluator.calculate_score_components_batch(
         cp.asarray(z)[:, ::2], cp.asarray(counts)[:, ::2], gpu_metadata, config, cp,
     )
@@ -67,14 +67,14 @@ def test_score_peak_plateau_and_strict_threshold(cp, ignore_safe):
     for row in e:
         # log10(|Z|) is exactly zero, so the log target fixes the comparison values.
         metadata = {'indices': cp.arange(row.size, dtype=np.int64), 'n_eval': row.size,
-                    'log_target': cp.asarray(-row), 'weights': cp.full(row.size, 1 / row.size, dtype=cp.float32),
-                    'window': 2}
+                    'log_target': cp.asarray(-row), 'weights': cp.full(row.size, 1 / row.size, dtype=cp.float32)}
         components = evaluator.calculate_score_components_batch(
             cp.ones(row.size, dtype=cp.complex64), cp.array([1, 0], dtype=cp.int32), metadata, config, cp,
         )
         actual.append([transfer_to_host(components[name])[0] for name in ('anti', 'resonance')])
 
-    expected = np.array([[0.25, 0] if ignore_safe else [0.625, 0.75], [0, 0], [0, 0.75]])
+    # プロミネンス定義: 行0の谷は両側とも端(0)まで走査され深さ0.5×2、行2の谷は肩0.25から0.75
+    expected = np.array([[0.25, 0] if ignore_safe else [0.625, 1.0], [0, 0], [0, 0.75]])
     np.testing.assert_allclose(np.array(actual), expected / evaluator.UNIT_DECADE, rtol=1e-6, atol=1e-6)
 
 

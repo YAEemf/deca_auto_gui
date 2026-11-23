@@ -1,5 +1,7 @@
+import logging
 import re
 import traceback
+import warnings
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple, Any, Callable
 import numpy as np
@@ -24,12 +26,15 @@ try:
     import skrf as rf
     from skrf.vectorFitting import VectorFitting
     SKRF_AVAILABLE = True
+    # scikit-rfは反復ごとにINFOログを出すため抑制する
+    logging.getLogger('skrf').setLevel(logging.WARNING)
 except ImportError:
     SKRF_AVAILABLE = False
     logger.warning("scikit-rfが利用できません。VectorFittingは使用できません")
 
 
 AC_OVERSAMPLE = 8  # SPICE AC解析の点密度（周波数グリッド比）
+VF_TOLERANCE = 0.01  # VectorFittingを採用する最大相対誤差（超える場合はAC解析結果をそのまま使う）
 
 
 def parse_spice_model(model_path: Path) -> Tuple[Optional[str], Optional[List[str]]]:
@@ -205,17 +210,24 @@ def apply_vector_fitting(z_samples: np.ndarray, f_grid: np.ndarray,
         model_order = min(n_poles, f_grid.size // 2)
         n_poles_cmplx = (model_order - 1) // 2
         vf = VectorFitting(network)
-        vf.vector_fit(
-            n_poles_real=model_order - 2 * n_poles_cmplx,
-            n_poles_cmplx=n_poles_cmplx,
-            init_pole_spacing='log',
-            parameter_type='z',
-            fit_proportional=True,  # jωESL を比例項で表す
-        )
+        with warnings.catch_warnings():
+            # 収束しない場合の警告は、下の再現誤差チェックで判定する
+            warnings.simplefilter('ignore', RuntimeWarning)
+            vf.vector_fit(
+                n_poles_real=model_order - 2 * n_poles_cmplx,
+                n_poles_cmplx=n_poles_cmplx,
+                init_pole_spacing='log',
+                parameter_type='z',
+                fit_proportional=True,  # jωESL を比例項で表す
+            )
         z_fitted = vf.get_model_response(0, 0, f_grid)
 
-        # 検証
+        # 検証: 自己共振の鋭い谷などを取り逃がしたモデルは採用しない
         if not validate_result(z_fitted, "VectorFitting結果"):
+            return None
+        rel_err = float(np.max(np.abs(z_fitted - z_samples) / np.maximum(np.abs(z_samples), 1e-30)))
+        if rel_err > VF_TOLERANCE:
+            logger.info(f"VectorFittingの再現誤差 {rel_err:.1%} が許容値を超えたためAC解析結果を使用します")
             return None
         
         return z_fitted
@@ -338,7 +350,8 @@ def estimate_rlc_parameters(z_c: np.ndarray, f_grid: np.ndarray) -> Tuple[float,
     order = np.argsort(freq)
     omega = 2 * np.pi * freq[order].astype(np.float64, copy=False)
     reactance = z_np.imag[order].astype(np.float64, copy=False)
-    esr = float(np.median(z_np.real))
+    # ESR は自己共振（|Z|最小）点の実部
+    esr = float(z_np.real[order][np.argmin(np.abs(z_np[order]))])
     tail_size = max(2, len(omega) // 5)
 
     capacitive = np.flatnonzero(reactance < 0)

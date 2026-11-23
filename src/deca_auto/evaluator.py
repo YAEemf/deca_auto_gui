@@ -4,11 +4,13 @@
 全成分は「小さいほど良い」非負値で、重み 1.0 が同程度の影響になるよう正規化している。
 目標比は e = log10(|Z_pdn| / Z_target)（decade）で扱い、単位 U = log10(2)（≒6.02dB）で割る。
 
-  max        : 帯域内の s の最大値。s = (max(e, −U) + U) / U は目標の1/2以下で0、目標ちょうどで1、2倍で2
+  max        : 帯域内の s の最大値。s は目標の1/2以下で0、目標ちょうどで1。目標より下は (e + U)/U、
+               目標超過側は 1 + VIOLATION_GAIN·e/U（超過は同じdB数のマージン改善より VIOLATION_GAIN 倍重い）
   area       : 目標超過量 max(e, 0)/U の帯域平均（対数周波数で重み付け）
   mean       : s の帯域平均（目標の1/2以下に下げても改善しないため、過剰設計を評価しない）
-  anti       : 反共振ピークの突出量（左右 ±ANTI_WINDOW_DECADES の谷底より高い分）/U の合計
-  resonance  : 直列共振の谷の深さ（左右の肩より低い分）/U の合計
+  anti       : 反共振ピークの突出量（プロミネンス: 左右それぞれ自分より高い点までの最小値のうち
+               高い方からの高さ）/U の合計。VRM-バルク間のような広い反共振も検出する
+  resonance  : 直列共振の谷の深さ（同じ定義を上下反転）/U の合計
   flat       : e の加重標準偏差 / U
   parts      : 部品総数 / PARTS_REFERENCE（10個で1）
   num_types  : 種類数 / TYPES_REFERENCE（5種類で1）
@@ -33,7 +35,7 @@ SCORE_COMPONENTS: Tuple[str, ...] = tuple(name.removeprefix("weight_") for name 
 IMPEDANCE_COMPONENTS: Tuple[str, ...] = ("max", "area", "mean", "anti", "resonance", "flat")
 
 UNIT_DECADE = float(np.log10(2.0))  # 正規化単位（6.02dB）
-ANTI_WINDOW_DECADES = 0.5           # ピーク/谷の突出量を測る片側窓幅 [decade]
+VIOLATION_GAIN = 4.0               # 目標超過側の s の傾き（目標割れは仕様違反なので強く罰する）
 PEAK_MIN_DECADE = 0.5 / 20.0        # 0.5dB未満の突出は数値リップルとして無視
 PARTS_REFERENCE = 10.0              # parts成分 = 部品総数 / 10
 TYPES_REFERENCE = 5.0               # num_types成分 = 種類数 / 5
@@ -47,7 +49,7 @@ using Count = SCORE_COUNT;
 constexpr int threads = 128;
 constexpr int warps = threads / 32;
 
-// Match the array operations' NaN propagation, including inside the windows.
+// Match the array operations' NaN propagation.
 __device__ Real larger(Real a, Real b) { return a >= b || isnan(a) ? a : b; }
 __device__ Real smaller(Real a, Real b) { return a <= b || isnan(a) ? a : b; }
 
@@ -63,17 +65,15 @@ __device__ Real warp_max(Real value) {
     return value;
 }
 
+// Topographic prominence: scan each side until a point beyond the extremum (or the band edge).
 template<bool peak>
-__device__ Real excursion(const Real* e, int i, int n, int window, bool ignore_safe,
-                          Real threshold) {
+__device__ Real excursion(const Real* e, int i, int n, bool ignore_safe, Real threshold) {
     const Real center = e[i];
-    const int begin = max(0, i - window);
-    const int end = min(n - 1 - i, window) + i;
     Real left = e[i - 1];
     Real right = e[i + 1];
-    for (int j = i - 2; j >= begin; --j)
+    for (int j = i - 2; j >= 0 && (peak ? !(e[j] > center) : !(e[j] < center)); --j)
         left = peak ? smaller(left, e[j]) : larger(left, e[j]);
-    for (int j = i + 2; j <= end; ++j)
+    for (int j = i + 2; j < n && (peak ? !(e[j] > center) : !(e[j] < center)); ++j)
         right = peak ? smaller(right, e[j]) : larger(right, e[j]);
     const Real shoulder = peak ? larger(left, right) : smaller(left, right);
     const Real amount = peak ? center - shoulder : shoulder - center;
@@ -83,7 +83,7 @@ __device__ Real excursion(const Real* e, int i, int n, int window, bool ignore_s
 extern "C" __global__ void score_components(
     const complex<Real>* z, long long z_row_stride, long long z_col_stride,
     const long long* indices, const Real* target, const Real* weights,
-    int n, int window, int ignore_safe, Real unit, Real threshold,
+    int n, int ignore_safe, Real unit, Real threshold, Real violation_gain,
     const Count* counts, int n_types, Real parts_ref, Real types_ref, Real* out)
 {
     const int row = blockIdx.x;
@@ -103,7 +103,8 @@ extern "C" __global__ void score_components(
     Real maximum = 0, mean = 0, area = 0, center_sum = 0, anti = 0, resonance = 0;
     for (int i = tid; i < n; i += threads) {
         const Real center = e[i];
-        const Real s = (larger(center, -unit) + unit) / unit;
+        const Real s = center > Real(0) ? Real(1) + violation_gain * center / unit
+                                        : (larger(center, -unit) + unit) / unit;
         const Real w = weights[i];
         maximum = larger(maximum, s);
         mean += s * w;
@@ -111,9 +112,9 @@ extern "C" __global__ void score_components(
         center_sum += center * w;
         if (i == 0 || i == n - 1) continue;
         if (center >= e[i - 1] && center > e[i + 1] && (!ignore_safe || center > 0))
-            anti += excursion<true>(e, i, n, window, ignore_safe, threshold);
+            anti += excursion<true>(e, i, n, ignore_safe, threshold);
         if (center <= e[i - 1] && center < e[i + 1])
-            resonance += excursion<false>(e, i, n, window, ignore_safe, threshold);
+            resonance += excursion<false>(e, i, n, ignore_safe, threshold);
     }
     maximum = warp_max(maximum);
     mean = warp_sum(mean);
@@ -210,8 +211,9 @@ def _gpu_score_components(z: Any, counts: Any, metadata: Dict[str, Any],
             (z, *(np.int64(stride // z.itemsize) for stride in z.strides),
              cp.asarray(metadata['indices'], dtype=np.int64, order='C'),
              cp.asarray(target, order='C'), cp.asarray(weights, order='C'),
-             np.int32(n_eval), np.int32(min(n_eval, max(1, int(metadata['window'])))),
+             np.int32(n_eval),
              np.int32(ignore_safe), dtype.type(UNIT_DECADE), dtype.type(PEAK_MIN_DECADE),
+             dtype.type(VIOLATION_GAIN),
              cp.ascontiguousarray(counts, dtype=count_dtype), np.int32(counts.shape[1]),
              dtype.type(PARTS_REFERENCE), dtype.type(TYPES_REFERENCE), out),
             shared_mem=shared_mem,
@@ -227,7 +229,6 @@ def build_eval_metadata(f_grid: Any, eval_mask: Any, target_mask: Any, xp: Any =
         'indices'      : 評価帯域の周波数インデックス (n,)
         'log_target'   : log10(Z_target) (n,)
         'weights'      : 対数周波数の台形重み（合計1） (n,)
-        'window'       : ピーク/谷判定の片側窓幅 [点]
     """
     indices = xp.where(xp.asarray(eval_mask, dtype=bool))[0]
     n_eval = int(indices.size)
@@ -238,11 +239,8 @@ def build_eval_metadata(f_grid: Any, eval_mask: Any, target_mask: Any, xp: Any =
         weights = xp.zeros(n_eval, dtype=np.float64)
         weights[:-1] += 0.5 * dlog
         weights[1:] += 0.5 * dlog
-        span = float(log_f[-1] - log_f[0])
-        points_per_decade = (n_eval - 1) / span if span > 0 else 1.0
     else:
         weights = xp.ones(max(n_eval, 1), dtype=np.float64)[:n_eval]
-        points_per_decade = 1.0
     weights = weights / max(float(weights.sum()), 1e-300)
     real_dtype = xp.asarray(f_grid).dtype
     return {
@@ -250,39 +248,63 @@ def build_eval_metadata(f_grid: Any, eval_mask: Any, target_mask: Any, xp: Any =
         'n_eval': n_eval,
         'log_target': xp.log10(xp.maximum(xp.asarray(target_mask)[indices], 1e-30)).astype(real_dtype),
         'weights': weights.astype(real_dtype),
-        'window': max(1, int(round(ANTI_WINDOW_DECADES * points_per_decade))),
     }
 
 
-def _sliding_extreme(x: Any, window: int, mode: str, side: str, xp: Any) -> Any:
+def _extremum_excursion(e: Any, mask: Any, peak: bool, xp: Any) -> Any:
     """
-    各点の片側窓（自身を含まない window 点）の最小値/最大値を返す（範囲外は ±inf）
+    局所極値の突出量（地形学的プロミネンス、scipy.signal.peak_prominences と同じ定義）
 
-    倍々（sparse table）で O(log window) 回の要素演算に抑える。
+    ピークは左右それぞれ「自分より高い点」または帯域端に当たるまでの最小値を求め、
+    高い方の最小値（基準）からの高さを返す。谷は符号を反転して同様に深さを返す。
+    極値の位置だけを左右に1点ずつ走査するため、計算量は 極値数 × 走査長。
+
+    Returns:
+        (B, n) 各極値位置の突出量（極値以外は0）
     """
-    op = xp.minimum if mode == "min" else xp.maximum
-    fill = np.inf if mode == "min" else -np.inf
-    n = x.shape[1]
-    window = min(window, max(n - 1, 1))
-    padded = xp.full((x.shape[0], n + 2 * window), fill, dtype=x.dtype)
-    padded[:, window:window + n] = x
-
-    # table[j] = 区間長 span の極値（開始点基準）
-    span = 1
-    table = padded
-    while span * 2 <= window:
-        shifted = xp.full_like(table, fill)
-        shifted[:, :-span] = table[:, span:]
-        table = op(table, shifted)
-        span *= 2
-    # 区間 [start, start + window) を長さ span の2区間で覆う
-    if side == "left":
-        start = xp.arange(n) + window - window          # i - window（パディング座標では i）
-    else:
-        start = xp.arange(n) + window + 1                # i + 1
-    first = table[:, start]
-    second = table[:, start + (window - span)]
-    return op(first, second)
+    sign = 1.0 if peak else -1.0
+    rows, cols = xp.nonzero(mask)
+    out = xp.zeros(e.shape, dtype=e.dtype)
+    if int(rows.size) == 0:
+        return out
+    n = e.shape[1]
+    se = sign * e
+    center = se[rows, cols]
+    shoulders = []
+    for step in (-1, 1):
+        # 走査中の極値だけを残しながら1点ずつ進める（計算量は走査長の総和）
+        base = xp.full(center.shape, np.inf, dtype=e.dtype)
+        active = xp.arange(center.size)
+        j = cols + step
+        while int(active.size):
+            inside = (j >= 0) & (j < n)
+            active, j = active[inside], j[inside]
+            value = se[rows[active], j]
+            keep = ~(value > center[active])
+            active, j, value = active[keep], j[keep], value[keep]
+            base[active] = xp.minimum(base[active], value)
+            j = j + step
+        shoulders.append(base)
+    out[rows, cols] = center - xp.maximum(shoulders[0], shoulders[1])
+    return out
+    n = e.shape[1]
+    se = sign * e
+    center = se[rows, cols]
+    bases = []
+    for step in (-1, 1):
+        base = xp.full(center.shape, np.inf, dtype=e.dtype)
+        alive = xp.ones(center.shape, dtype=bool)
+        for d in range(1, n):
+            j = cols + step * d
+            alive &= (j >= 0) & (j < n)
+            if not bool(alive.any()):
+                break
+            value = se[rows, xp.clip(j, 0, n - 1)]
+            alive &= ~(value > center)
+            base = xp.where(alive, xp.minimum(base, value), base)
+        bases.append(base)
+    out[rows, cols] = center - xp.maximum(bases[0], bases[1])
+    return out
 
 
 def calculate_score_components_batch(
@@ -337,7 +359,8 @@ def calculate_score_components_batch(
     e = xp.log10(xp.maximum(xp.abs(z[:, eval_metadata['indices']]), 1e-30)) - eval_metadata['log_target']
     e = e.astype(real_dtype, copy=False)
 
-    s = (xp.maximum(e, -UNIT_DECADE) + UNIT_DECADE) / UNIT_DECADE
+    s = xp.where(e > 0, 1.0 + VIOLATION_GAIN * e / UNIT_DECADE,
+                 (xp.maximum(e, -UNIT_DECADE) + UNIT_DECADE) / UNIT_DECADE)
     comps['max'] = s.max(axis=1)
     comps['mean'] = s @ w
     comps['area'] = xp.maximum(e, 0.0) @ w / UNIT_DECADE
@@ -346,30 +369,24 @@ def calculate_score_components_batch(
     comps['flat'] = xp.sqrt(xp.maximum(((e - e_mean[:, None]) ** 2) @ w, 0.0)) / UNIT_DECADE
 
     if n_eval >= 3:
-        window = int(eval_metadata['window'])
-        inner = slice(1, -1)
-        center = e[:, inner]
         ignore_safe = bool(config.ignore_safe_anti_resonance)
+        edge = xp.zeros((n_batch, 1), dtype=bool)
+        center = e[:, 1:-1]
 
-        # 反共振ピーク: 局所最大点の、左右窓内の谷底のうち高い方からの突出量
-        is_peak = (center >= e[:, :-2]) & (center > e[:, 2:])
-        left_min = _sliding_extreme(e, window, "min", "left", xp)[:, inner]
-        right_min = _sliding_extreme(e, window, "min", "right", xp)[:, inner]
-        prominence = center - xp.maximum(left_min, right_min)
+        # 反共振ピーク: 局所最大点のプロミネンス
+        is_peak = xp.concatenate([edge, (center >= e[:, :-2]) & (center > e[:, 2:]), edge], axis=1)
+        prominence = _extremum_excursion(e, is_peak, True, xp)
         valid = is_peak & (prominence > PEAK_MIN_DECADE)
         if ignore_safe:
-            valid &= center > 0.0
+            valid &= e > 0.0
         comps['anti'] = xp.where(valid, prominence, 0.0).sum(axis=1) / UNIT_DECADE
 
-        # 共振の谷: 局所最小点の、左右窓内の肩のうち低い方からの深さ
-        is_dip = (center <= e[:, :-2]) & (center < e[:, 2:])
-        left_max = _sliding_extreme(e, window, "max", "left", xp)[:, inner]
-        right_max = _sliding_extreme(e, window, "max", "right", xp)[:, inner]
-        shoulder = xp.minimum(left_max, right_max)
-        depth = shoulder - center
+        # 共振の谷: 局所最小点の深さ（肩 = 谷の基準 = e + 深さ）
+        is_dip = xp.concatenate([edge, (center <= e[:, :-2]) & (center < e[:, 2:]), edge], axis=1)
+        depth = _extremum_excursion(e, is_dip, False, xp)
         valid = is_dip & (depth > PEAK_MIN_DECADE)
         if ignore_safe:
-            valid &= shoulder > 0.0
+            valid &= (e + depth) > 0.0
         comps['resonance'] = xp.where(valid, depth, 0.0).sum(axis=1) / UNIT_DECADE
     else:
         comps['anti'] = xp.zeros(n_batch, dtype=real_dtype)

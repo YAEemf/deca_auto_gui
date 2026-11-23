@@ -27,9 +27,10 @@ def test_component_names_follow_weight_fields():
 def test_flat_impedance_levels():
     rows = [np.full_like(F, 10e-3 * r) for r in (0.1, 0.5, 1.0, 2.0)]
     comps, _ = _components(rows, [[1]] * 4)
-    # 目標の1/2以下は飽和（過剰設計を評価しない）、目標で1、2倍で2
-    np.testing.assert_allclose(comps["max"], [0.0, 0.0, 1.0, 2.0], atol=1e-9)
-    np.testing.assert_allclose(comps["mean"], [0.0, 0.0, 1.0, 2.0], atol=1e-9)
+    # 目標の1/2以下は飽和（過剰設計を評価しない）、目標で1、2倍（+6dB超過）で 1 + VIOLATION_GAIN
+    expected = [0.0, 0.0, 1.0, 1.0 + evaluator.VIOLATION_GAIN]
+    np.testing.assert_allclose(comps["max"], expected, atol=1e-9)
+    np.testing.assert_allclose(comps["mean"], expected, atol=1e-9)
     np.testing.assert_allclose(comps["area"], [0.0, 0.0, 0.0, 1.0], atol=1e-9)
     np.testing.assert_allclose(comps["anti"], 0.0, atol=1e-12)
     np.testing.assert_allclose(comps["resonance"], 0.0, atol=1e-12)
@@ -46,6 +47,29 @@ def test_anti_resonance_peak_prominence():
     np.testing.assert_allclose(comps["anti"], [1.0, 1.0], rtol=0.02)
     comps, _ = _components([below, above], [[1], [1]], ignore_safe_anti_resonance=True)
     assert comps["anti"][0] == 0.0 and comps["anti"][1] > 0.95
+
+
+def test_prominence_matches_scipy():
+    """突出量/谷の深さは scipy.signal.peak_prominences と一致する（窓幅に依存しない）"""
+    from scipy.signal import peak_prominences
+    rng = np.random.default_rng(5)
+    e = np.cumsum(rng.normal(size=(20, 300)), axis=1) * 0.02
+    for peak in (True, False):
+        x = e if peak else -e
+        mask = np.zeros_like(e, dtype=bool)
+        mask[:, 1:-1] = (x[:, 1:-1] >= x[:, :-2]) & (x[:, 1:-1] > x[:, 2:])
+        got = evaluator._extremum_excursion(e, mask, peak, np)
+        for row in range(e.shape[0]):
+            idx = np.nonzero(mask[row])[0]
+            np.testing.assert_allclose(got[row, idx], peak_prominences(x[row], idx)[0], atol=1e-12)
+
+
+def test_wide_anti_resonance_is_detected():
+    """1デケード以上の幅を持つ反共振（VRM-バルク間など）も突出量として評価される"""
+    log_f = np.log10(F)
+    wide = 10e-3 * 0.5 * 10 ** (np.exp(-0.5 * ((log_f - 5.5) / 0.6) ** 2) * np.log10(2.0))
+    comps, _ = _components([wide], [[1]])
+    np.testing.assert_allclose(comps["anti"], [1.0], rtol=0.05)
 
 
 def test_parts_cost_independent_of_max_total_parts():
