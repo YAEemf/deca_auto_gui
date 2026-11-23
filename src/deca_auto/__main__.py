@@ -1,231 +1,114 @@
-import sys
-import os
 import argparse
-import subprocess
-import socket
-from pathlib import Path
-from typing import List, Optional
-import traceback
-import numpy as np
 import logging
+import os
+import socket
+import subprocess
+import sys
+from pathlib import Path
 
-from deca_auto.config import load_config, USER_CONFIG
-from deca_auto.utils import logger, generate_frequency_grid, get_dtype, set_log_level
-from deca_auto.main import run_optimization
+import numpy as np
 
-
-def check_port(port: int) -> bool:
-    """ポートが利用可能か確認"""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            result = s.connect_ex(('localhost', port))
-            return result != 0
-    except:
-        return True
+from deca_auto.config import UserConfig, load_config
+from deca_auto.utils import (
+    generate_frequency_grid, get_backend, get_dtype, logger, set_log_level, transfer_to_host,
+)
 
 
-def find_available_port(start_port: int, max_attempts: int = 10) -> int:
-    """利用可能なポートを探す"""
-    for i in range(max_attempts):
-        port = start_port + i
-        if check_port(port):
-            return port
-    raise RuntimeError(f"利用可能なポートが見つかりません (試行: {start_port}-{start_port+max_attempts-1})")
+def find_available_port(start_port, max_attempts=10):
+    """ローカルで接続を受け付けていないポートを探す。"""
+    for port in range(start_port, min(start_port + max_attempts, 65536)):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            if sock.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    raise RuntimeError(f"ポート {start_port} 以降に空きがありません")
 
 
-def launch_streamlit(
-    config_files: List[str] = None,
-    no_search: bool = False,
-    force_numpy_override: Optional[bool] = None,
-    cuda_override: Optional[int] = None,
-):
-    """StreamlitのGUIを起動"""
-    try:
-        # インターフェースモジュールのパスを取得
-        interface_path = Path(__file__).parent / "interface.py"
-        
-        # ポートの確認と変更
-        port = USER_CONFIG.server_port
-        if not check_port(port):
-            logger.info(f"ポート {port} は使用中です")
-            port = find_available_port(port + 1)
-            logger.info(f"ポート {port} を使用します")
-        
-        # Streamlitコマンド構築
-        cmd = [
-            sys.executable,
-            "-m", "streamlit", "run",
-            str(interface_path.resolve()),
-            "--server.port", str(port),
-            "--server.address", "localhost",
-            "--browser.gatherUsageStats", "false",
-        ]
-        
-        # ダークテーマ設定
-        if USER_CONFIG.dark_theme:
-            cmd.extend(["--theme.base", "dark"])
-        
-        # 環境変数に設定情報を渡す
-        env = os.environ.copy()
-        if config_files:
-            env["DECA_CONFIG_FILES"] = ",".join(config_files)
-        if no_search:
-            env["DECA_NO_SEARCH"] = "1"
-        if force_numpy_override is not None:
-            env["DECA_FORCE_NUMPY"] = "1" if force_numpy_override else "0"
-        if cuda_override is not None:
-            env["DECA_CUDA_DEVICE"] = str(cuda_override)
-        # ログレベルを環境変数で渡す
-        env["DECA_LOG_LEVEL"] = str(logger.level)
+def launch_streamlit(config, args):
+    """StreamlitのGUIを起動する。"""
+    interface_path = Path(__file__).with_name("interface.py")
+    port = find_available_port(config.server_port, max_attempts=11)
+    command = [
+        sys.executable, "-m", "streamlit", "run", str(interface_path),
+        "--server.port", str(port), "--server.address", "localhost",
+        "--browser.gatherUsageStats", "false",
+        "--theme.base", "dark" if config.dark_theme else "light",
+    ]
+    env = os.environ.copy()
+    if args.config:
+        env["DECA_CONFIG_FILES"] = ",".join(args.config)
+    if args.no_search:
+        env["DECA_NO_SEARCH"] = "1"
+    if args.force_numpy:
+        env["DECA_FORCE_NUMPY"] = "1"
+    if args.cuda is not None:
+        env["DECA_CUDA_DEVICE"] = str(args.cuda)
+    if args.output:
+        env["DECA_EXCEL_PATH"] = args.output
+    env["DECA_LOG_LEVEL"] = str(logger.level)
 
-        # Streamlit起動
-        logger.info(f"起動しています... (http://localhost:{port})")
-        subprocess.run(cmd, env=env)
-        
-    except KeyboardInterrupt:
-        logger.info("GUIを終了します")
-    except Exception as e:
-        logger.error(f"GUI起動エラー: {e}")
-        traceback.print_exc()
-        sys.exit(1)
+    logger.info("起動しています... (http://localhost:%s)", port)
+    subprocess.run(command, env=env, check=True)
+
+
+def calculate_zc(config: UserConfig, *, allow_gpu=False):
+    """|Z_c|計算と表示に必要なホスト配列を返す。"""
+    from deca_auto.capacitor import calculate_all_capacitor_impedances
+
+    xp = get_backend(config.force_numpy, config.cuda)[0] if allow_gpu else np
+    grid = generate_frequency_grid(
+        config.f_start, config.f_stop, config.num_points_per_decade, xp,
+        dtype=get_dtype(config.dtype_r),
+    )
+    impedances = calculate_all_capacitor_impedances(
+        config, grid, xp, None, get_dtype(config.dtype_c),
+    )
+    return transfer_to_host(grid), {name: transfer_to_host(z) for name, z in impedances.items()}
 
 
 def main():
-    """メインエントリポイント"""
     parser = argparse.ArgumentParser(
-        description="PDN Impedance Optimization Tool - Decoupling Capacitor Auto-selection"
+        description="PDN Impedance Optimization Tool - Decoupling Capacitor Auto-selection",
     )
-    
-    # オプション定義
-    parser.add_argument(
-        "--gui",
-        action="store_true",
-        help="GUIを起動 (use_gui=FalseでもGUIを有効化)"
-    )
-    parser.add_argument(
-        "--no-gui",
-        action="store_true",
-        help="GUIを無効化 (use_gui=TrueでもGUIを無効化、探索速度優先)"
-    )
-    parser.add_argument(
-        "--config",
-        nargs="+",
-        help="設定ファイル（複数指定可能）"
-    )
-    parser.add_argument(
-        "--no-search",
-        action="store_true",
-        help="探索を行わずZ_cのみ計算"
-    )
-    parser.add_argument(
-        "--force-numpy",
-        action="store_true",
-        help="CuPyが利用可能でもNumPyを強制使用"
-    )
-    parser.add_argument(
-        "--cuda",
-        type=int,
-        default=0,
-        help="使用するGPU番号 (デフォルト: 0)"
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="詳細なログ出力"
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        help="Excel出力先ディレクトリ"
-    )
-    
+    parser.add_argument("--gui", action="store_true", help="GUIを起動 (use_gui=Falseでも有効)")
+    parser.add_argument("--no-gui", action="store_true", help="GUIを無効化 (use_gui=Trueでも無効)")
+    parser.add_argument("--config", nargs="+", help="設定ファイル（複数指定可能）")
+    parser.add_argument("--no-search", action="store_true", help="探索を行わずZ_cのみ計算")
+    parser.add_argument("--force-numpy", action="store_true", help="NumPyを強制使用")
+    parser.add_argument("--cuda", type=int, help="使用するGPU番号")
+    parser.add_argument("--verbose", action="store_true", help="詳細なログ出力")
+    parser.add_argument("--output", help="Excel出力先ディレクトリ")
     args = parser.parse_args()
-    
-    # ロギングレベル設定
-    if args.verbose:
-        set_log_level(logging.DEBUG)
-    else:
-        set_log_level(logging.INFO)
-    
-    # 設定ファイルの読み込み
-    configs = []
-    if args.config:
-        for config_file in args.config:
-            config_path = Path(config_file)
-            if config_path.exists():
-                config = load_config(config_path)
-                configs.append(config)
-                logger.info(f"設定ファイルを読み込みました: {config_path}")
-            else:
-                logger.error(f"設定ファイルが見つかりません: {config_path}")
-                sys.exit(1)
-    else:
-        # デフォルト設定を使用
-        configs.append(USER_CONFIG)
-    
-    # 設定の上書き
-    for config in configs:
-        if args.force_numpy:
-            config.force_numpy = True
-        if args.cuda is not None:
-            config.cuda = args.cuda
-        if args.output:
-            config.excel_path = args.output
-    
-    # GUI使用判定
-    use_gui = configs[0].use_gui  # 最初の設定を基準にする
-    if args.gui:
-        use_gui = True
-    if args.no_gui:
-        use_gui = False
-    
-    # 実行
-    if use_gui:
-        # GUI起動
-        launch_streamlit(
-            config_files=args.config,
-            no_search=args.no_search,
-            force_numpy_override=configs[0].force_numpy if configs else None,
-            cuda_override=configs[0].cuda if configs else None,
-        )
-    else:
-        # CLIモード
+    set_log_level(logging.DEBUG if args.verbose else logging.INFO)
+
+    try:
+        configs = [load_config(path, strict=True) for path in args.config] if args.config else [UserConfig()]
+        if not args.no_gui and (args.gui or configs[0].use_gui):
+            launch_streamlit(configs[0], args)
+            return
+
+        from deca_auto.main import run_optimization
+
         logger.info("CLIモードで実行します")
-        try:
-            for i, config in enumerate(configs):
-                if len(configs) > 1:
-                    logger.info(f"設定 {i+1}/{len(configs)} を処理中...")
-                
-                # 探索実行
-                if not args.no_search:
-                    run_optimization(config, gui_callback=None)
-                else:
-                    logger.info("--no-searchが指定されたため、Z_c計算のみ実行します")
-                    # Z_c計算のみ実行する処理を追加
-                    from deca_auto.capacitor import calculate_all_capacitor_impedances
-                    f_grid = generate_frequency_grid(
-                        config.f_start,
-                        config.f_stop,
-                        config.num_points_per_decade,
-                        np,
-                        dtype=get_dtype(config.dtype_r),
-                    )
-                    calculate_all_capacitor_impedances(
-                        config,
-                        f_grid,
-                        np,
-                        None,
-                        get_dtype(config.dtype_c),
-                    )
-                
-        except KeyboardInterrupt:
-            logger.info("処理を中断しました")
-            sys.exit(0)
-        except Exception as e:
-            logger.error(f"実行エラー: {e}")
-            traceback.print_exc()
-            sys.exit(1)
+        for i, config in enumerate(configs, 1):
+            if len(configs) > 1:
+                logger.info("設定 %s/%s を処理中...", i, len(configs))
+            if args.force_numpy:
+                config.force_numpy = True
+            if args.cuda is not None:
+                config.cuda = args.cuda
+            if args.output:
+                config.excel_path = args.output
+            if args.no_search:
+                logger.info("--no-searchが指定されたため、Z_c計算のみ実行します")
+                calculate_zc(config)
+            else:
+                run_optimization(config, gui_callback=None)
+    except KeyboardInterrupt:
+        logger.info("処理を中断しました")
+    except Exception:
+        logger.exception("実行エラー")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

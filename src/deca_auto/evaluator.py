@@ -1,676 +1,499 @@
-import traceback
-from typing import Dict, List, Tuple, Optional, Any
+"""
+スコア評価（評価帯域内の |Z_pdn| と目標マスクの比較）、top_k抽出、Monte Carloロバスト評価
+
+全成分は「小さいほど良い」非負値で、重み 1.0 が同程度の影響になるよう正規化している。
+目標比は e = log10(|Z_pdn| / Z_target)（decade）で扱い、単位 U = log10(2)（≒6.02dB）で割る。
+
+  max        : 帯域内の s の最大値。s = (max(e, −U) + U) / U は目標の1/2以下で0、目標ちょうどで1、2倍で2
+  area       : 目標超過量 max(e, 0)/U の帯域平均（対数周波数で重み付け）
+  mean       : s の帯域平均（目標の1/2以下に下げても改善しないため、過剰設計を評価しない）
+  anti       : 反共振ピークの突出量（左右 ±ANTI_WINDOW_DECADES の谷底より高い分）/U の合計
+  resonance  : 直列共振の谷の深さ（左右の肩より低い分）/U の合計
+  flat       : e の加重標準偏差 / U
+  parts      : 部品総数 / PARTS_REFERENCE（10個で1）
+  num_types  : 種類数 / TYPES_REFERENCE（5種類で1）
+               ※ max_total_parts や候補リストの長さで正規化すると、上限を大きくしただけで
+                 1個あたりのコストが下がり部品を使い過ぎるため、固定の基準値で正規化する
+  mc_worst   : Monte Carlo最悪サンプルにおける「インピーダンス成分の重み付き和」の公称値からの悪化量
+
+総合スコア = Σ weight_<成分> × 成分
+"""
+
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 
-from deca_auto.config import UserConfig
-from deca_auto.utils import logger, transfer_to_host, safe_divide
-from deca_auto.pdn import calculate_pdn_impedance_monte_carlo, prepare_pdn_components
+from deca_auto.config import UserConfig, WEIGHT_FIELDS
+from deca_auto.utils import cp, transfer_to_host
+from deca_auto.pdn import calculate_pdn_impedance_monte_carlo
+
+# 成分名（WEIGHT_FIELDS と同順）
+SCORE_COMPONENTS: Tuple[str, ...] = tuple(name.removeprefix("weight_") for name in WEIGHT_FIELDS)
+# |Z_pdn| から決まる成分（Monte Carloで再評価する対象）
+IMPEDANCE_COMPONENTS: Tuple[str, ...] = ("max", "area", "mean", "anti", "resonance", "flat")
+
+UNIT_DECADE = float(np.log10(2.0))  # 正規化単位（6.02dB）
+ANTI_WINDOW_DECADES = 0.5           # ピーク/谷の突出量を測る片側窓幅 [decade]
+PEAK_MIN_DECADE = 0.5 / 20.0        # 0.5dB未満の突出は数値リップルとして無視
+PARTS_REFERENCE = 10.0              # parts成分 = 部品総数 / 10
+TYPES_REFERENCE = 5.0               # num_types成分 = 種類数 / 5
+
+
+_SCORE_KERNEL_SOURCE = r"""
+#include <cupy/complex.cuh>
+
+using Real = SCORE_REAL;
+using Count = SCORE_COUNT;
+constexpr int threads = 128;
+constexpr int warps = threads / 32;
+
+// Match the array operations' NaN propagation, including inside the windows.
+__device__ Real larger(Real a, Real b) { return a >= b || isnan(a) ? a : b; }
+__device__ Real smaller(Real a, Real b) { return a <= b || isnan(a) ? a : b; }
+
+__device__ Real warp_sum(Real value) {
+    for (int step = 16; step > 0; step /= 2)
+        value += __shfl_down_sync(0xffffffff, value, step);
+    return value;
+}
+
+__device__ Real warp_max(Real value) {
+    for (int step = 16; step > 0; step /= 2)
+        value = larger(value, __shfl_down_sync(0xffffffff, value, step));
+    return value;
+}
+
+template<bool peak>
+__device__ Real excursion(const Real* e, int i, int n, int window, bool ignore_safe,
+                          Real threshold) {
+    const Real center = e[i];
+    const int begin = max(0, i - window);
+    const int end = min(n - 1 - i, window) + i;
+    Real left = e[i - 1];
+    Real right = e[i + 1];
+    for (int j = i - 2; j >= begin; --j)
+        left = peak ? smaller(left, e[j]) : larger(left, e[j]);
+    for (int j = i + 2; j <= end; ++j)
+        right = peak ? smaller(right, e[j]) : larger(right, e[j]);
+    const Real shoulder = peak ? larger(left, right) : smaller(left, right);
+    const Real amount = peak ? center - shoulder : shoulder - center;
+    return amount > threshold && (peak || !ignore_safe || shoulder > 0) ? amount : 0;
+}
+
+extern "C" __global__ void score_components(
+    const complex<Real>* z, long long z_row_stride, long long z_col_stride,
+    const long long* indices, const Real* target, const Real* weights,
+    int n, int window, int ignore_safe, Real unit, Real threshold,
+    const Count* counts, int n_types, Real parts_ref, Real types_ref, Real* out)
+{
+    const int row = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int warp = tid / 32;
+    const int lane = tid % 32;
+    extern __shared__ Real e[];
+    __shared__ Real partial[5][warps];
+    __shared__ Real e_mean;
+    z += row * z_row_stride;
+    for (int i = tid; i < n; i += threads) {
+        const Real magnitude = abs(z[indices[i] * z_col_stride]);
+        e[i] = log10(larger(magnitude, Real(1e-30))) - target[i];
+    }
+    __syncthreads();
+
+    Real maximum = 0, mean = 0, area = 0, center_sum = 0, anti = 0, resonance = 0;
+    for (int i = tid; i < n; i += threads) {
+        const Real center = e[i];
+        const Real s = (larger(center, -unit) + unit) / unit;
+        const Real w = weights[i];
+        maximum = larger(maximum, s);
+        mean += s * w;
+        area += larger(center, Real(0)) * w;
+        center_sum += center * w;
+        if (i == 0 || i == n - 1) continue;
+        if (center >= e[i - 1] && center > e[i + 1] && (!ignore_safe || center > 0))
+            anti += excursion<true>(e, i, n, window, ignore_safe, threshold);
+        if (center <= e[i - 1] && center < e[i + 1])
+            resonance += excursion<false>(e, i, n, window, ignore_safe, threshold);
+    }
+    maximum = warp_max(maximum);
+    mean = warp_sum(mean);
+    area = warp_sum(area);
+    center_sum = warp_sum(center_sum);
+    anti = warp_sum(anti);
+    resonance = warp_sum(resonance);
+    __shared__ Real center_partial[warps];
+    if (lane == 0) {
+        partial[0][warp] = maximum;
+        partial[1][warp] = mean;
+        partial[2][warp] = area;
+        partial[3][warp] = anti;
+        partial[4][warp] = resonance;
+        center_partial[warp] = center_sum;
+    }
+    __syncthreads();
+    if (tid == 0) {
+        e_mean = 0;
+        for (int j = 0; j < warps; ++j) e_mean += center_partial[j];
+    }
+    __syncthreads();
+
+    // Accumulate centered squares directly to retain accuracy for flat curves.
+    Real variance = 0;
+    for (int i = tid; i < n; i += threads) {
+        const Real delta = e[i] - e_mean;
+        variance += (delta * delta) * weights[i];
+    }
+    variance = warp_sum(variance);
+    if (lane == 0) center_partial[warp] = variance;
+    __syncthreads();
+
+    if (tid == 0) {
+        maximum = 0;
+        mean = area = anti = resonance = variance = 0;
+        for (int j = 0; j < warps; ++j) {
+            maximum = larger(maximum, partial[0][j]);
+            mean += partial[1][j];
+            area += partial[2][j];
+            anti += partial[3][j];
+            resonance += partial[4][j];
+            variance += center_partial[j];
+        }
+        long long parts = 0;
+        int types = 0;
+        for (int t = 0; t < n_types; ++t) {
+            const Count count = counts[(long long)row * n_types + t];
+            parts += count;
+            types += count > 0;
+        }
+        // Component-major output gives each returned component a contiguous view.
+        out[row] = Real(parts) / parts_ref;
+        out[gridDim.x + row] = Real(types) / types_ref;
+        out[2LL * gridDim.x + row] = maximum;
+        out[3LL * gridDim.x + row] = mean;
+        out[4LL * gridDim.x + row] = area / unit;
+        out[5LL * gridDim.x + row] = sqrt(larger(variance, Real(0))) / unit;
+        out[6LL * gridDim.x + row] = anti / unit;
+        out[7LL * gridDim.x + row] = resonance / unit;
+    }
+}
+"""
+_SCORE_KERNELS: Dict[Tuple[np.dtype, np.dtype], Any] = {}
+_GPU_SCORE_COMPONENTS = ('parts', 'num_types', 'max', 'mean', 'area', 'flat', 'anti', 'resonance')
+
+
+def _gpu_score_components(z: Any, counts: Any, metadata: Dict[str, Any],
+                          ignore_safe: bool) -> Optional[Dict[str, Any]]:
+    """同じ実数精度の評価データを行ごとに融合評価する。共有メモリに収まらなければ従来経路を使う。"""
+    n_eval = int(metadata['n_eval'])
+    dtype = z.real.dtype
+    shared_mem = n_eval * dtype.itemsize
+    target, weights = metadata['log_target'], metadata['weights']
+    if (z.dtype not in (np.complex64, np.complex128) or counts.dtype.kind != 'i'
+            or counts.shape[0] != z.shape[0] or z.ndim != 2 or counts.ndim != 2
+            or target.dtype != dtype or weights.dtype != dtype
+            or shared_mem + 256 > 48 * 1024):
+        return None
+
+    count_dtype = np.dtype(np.int32 if counts.dtype.itemsize <= 4 else np.int64)
+    key = (dtype, count_dtype)
+    if key not in _SCORE_KERNELS:
+        real = 'float' if dtype == np.float32 else 'double'
+        count = 'int' if count_dtype == np.int32 else 'long long'
+        source = _SCORE_KERNEL_SOURCE.replace('SCORE_REAL', real).replace('SCORE_COUNT', count)
+        _SCORE_KERNELS[key] = cp.RawKernel(source, 'score_components')
+
+    batch_size = z.shape[0]
+    out = cp.empty((len(_GPU_SCORE_COMPONENTS), batch_size), dtype=dtype)
+    if batch_size:
+        _SCORE_KERNELS[key](
+            (batch_size,), (128,),
+            (z, *(np.int64(stride // z.itemsize) for stride in z.strides),
+             cp.asarray(metadata['indices'], dtype=np.int64, order='C'),
+             cp.asarray(target, order='C'), cp.asarray(weights, order='C'),
+             np.int32(n_eval), np.int32(min(n_eval, max(1, int(metadata['window'])))),
+             np.int32(ignore_safe), dtype.type(UNIT_DECADE), dtype.type(PEAK_MIN_DECADE),
+             cp.ascontiguousarray(counts, dtype=count_dtype), np.int32(counts.shape[1]),
+             dtype.type(PARTS_REFERENCE), dtype.type(TYPES_REFERENCE), out),
+            shared_mem=shared_mem,
+        )
+    return {name: out[i] for i, name in enumerate(_GPU_SCORE_COMPONENTS)}
+
+
+def build_eval_metadata(f_grid: Any, eval_mask: Any, target_mask: Any, xp: Any = np) -> Dict[str, Any]:
+    """
+    評価帯域に関する事前計算（全チャンク共通）
+
+    Returns:
+        'indices'      : 評価帯域の周波数インデックス (n,)
+        'log_target'   : log10(Z_target) (n,)
+        'weights'      : 対数周波数の台形重み（合計1） (n,)
+        'window'       : ピーク/谷判定の片側窓幅 [点]
+    """
+    indices = xp.where(xp.asarray(eval_mask, dtype=bool))[0]
+    n_eval = int(indices.size)
+    f_eval = xp.asarray(f_grid)[indices].astype(np.float64)
+    log_f = xp.log10(f_eval)
+    if n_eval >= 2:
+        dlog = xp.diff(log_f)
+        weights = xp.zeros(n_eval, dtype=np.float64)
+        weights[:-1] += 0.5 * dlog
+        weights[1:] += 0.5 * dlog
+        span = float(log_f[-1] - log_f[0])
+        points_per_decade = (n_eval - 1) / span if span > 0 else 1.0
+    else:
+        weights = xp.ones(max(n_eval, 1), dtype=np.float64)[:n_eval]
+        points_per_decade = 1.0
+    weights = weights / max(float(weights.sum()), 1e-300)
+    real_dtype = xp.asarray(f_grid).dtype
+    return {
+        'indices': indices,
+        'n_eval': n_eval,
+        'log_target': xp.log10(xp.maximum(xp.asarray(target_mask)[indices], 1e-30)).astype(real_dtype),
+        'weights': weights.astype(real_dtype),
+        'window': max(1, int(round(ANTI_WINDOW_DECADES * points_per_decade))),
+    }
+
+
+def _sliding_extreme(x: Any, window: int, mode: str, side: str, xp: Any) -> Any:
+    """
+    各点の片側窓（自身を含まない window 点）の最小値/最大値を返す（範囲外は ±inf）
+
+    倍々（sparse table）で O(log window) 回の要素演算に抑える。
+    """
+    op = xp.minimum if mode == "min" else xp.maximum
+    fill = np.inf if mode == "min" else -np.inf
+    n = x.shape[1]
+    window = min(window, max(n - 1, 1))
+    padded = xp.full((x.shape[0], n + 2 * window), fill, dtype=x.dtype)
+    padded[:, window:window + n] = x
+
+    # table[j] = 区間長 span の極値（開始点基準）
+    span = 1
+    table = padded
+    while span * 2 <= window:
+        shifted = xp.full_like(table, fill)
+        shifted[:, :-span] = table[:, span:]
+        table = op(table, shifted)
+        span *= 2
+    # 区間 [start, start + window) を長さ span の2区間で覆う
+    if side == "left":
+        start = xp.arange(n) + window - window          # i - window（パディング座標では i）
+    else:
+        start = xp.arange(n) + window + 1                # i + 1
+    first = table[:, start]
+    second = table[:, start + (window - span)]
+    return op(first, second)
 
 
 def calculate_score_components_batch(
     z_pdn_batch: Any,
-    target_curve: Any,
-    eval_mask: Any,
     count_vectors: Any,
+    eval_metadata: Dict[str, Any],
     config: UserConfig,
     xp: Any = np,
-    f_grid: Optional[Any] = None,
-    eval_metadata: Optional[Dict[str, Any]] = None,
-    z_without_decap: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
-    バッチ処理版スコアコンポーネント計算
+    バッチのスコア成分を計算する（mc_worst を除く）。
+    CuPyでは対応する精度と帯域幅を融合カーネルで評価し、それ以外は配列演算で評価する。
 
-    評価項目（全て正の値で、小さいほど良い特性）:
-        - max: 最大インピーダンス比
-        - area: 目標超過面積（台形積分）
-        - mean: 平均インピーダンス比（対数周波数重み付き）
-        - anti: 反共振（ピークの高さと鋭さを考慮）
-        - flat: 平滑さ（対数周波数での重み付き変動係数）
-        - under: 目標未達面積（負の重みで良い特性として評価）
-        - parts: 部品数（正規化）
-        - num_types: 種類数（正規化）
-        - resonance: レゾナンス（谷の深さ、鋭さ、周波数重みを考慮）
-        - improvement: Without Decapからの悪化面積
-        - low_improvement: 低改善度帯域の面積
+    Args:
+        z_pdn_batch: (B, F) 複素 Z_pdn
+        count_vectors: (B, T) カウントベクトル
+        eval_metadata: build_eval_metadata の結果
+        config: ユーザー設定
+        xp: バックエンド
 
-    改善内容（v8.1）:
-        - mean: 対数周波数での重み付き平均に変更
-        - flat: 対数周波数での重み付き標準偏差と変動係数に変更
-        - anti: ピークの鋭さ（周辺との高さ比）を考慮
-        - resonance: 谷の鋭さと低周波数での重要度を考慮
+    Returns:
+        {成分名: (B,) 実数配列}
     """
+    z = xp.asarray(z_pdn_batch)
+    if z.ndim == 1:
+        z = z[None, :]
+    counts = xp.asarray(count_vectors)
+    if counts.ndim == 1:
+        counts = counts[None, :]
+    real_dtype = z.real.dtype
+    n_batch = z.shape[0]
+    n_eval = int(eval_metadata['n_eval'])
 
-    z_pdn_batch = xp.asarray(z_pdn_batch)
-    if z_pdn_batch.ndim == 1:
-        z_pdn_batch = z_pdn_batch[xp.newaxis, :]
+    if xp is cp and n_eval:
+        fused = _gpu_score_components(z, counts, eval_metadata, bool(config.ignore_safe_anti_resonance))
+        if fused is not None:
+            return fused
 
-    count_vectors = xp.asarray(count_vectors)
-    if count_vectors.ndim == 1:
-        count_vectors = count_vectors[xp.newaxis, :]
+    comps: Dict[str, Any] = {}
 
-    if z_pdn_batch.shape[0] != count_vectors.shape[0]:
-        raise ValueError("z_pdn_batch と count_vectors のバッチ次元が一致しません")
-
-    metadata = eval_metadata or {}
-    freq_indices = metadata.get('indices')
-    df_log = metadata.get('df_log')
-    n_eval = int(metadata.get('n_eval', 0)) if freq_indices is not None else -1
-
-    if freq_indices is not None:
-        freq_indices = xp.asarray(freq_indices, dtype=getattr(xp, "int64", np.int64))
-        n_eval = int(n_eval if n_eval >= 0 else freq_indices.shape[0])
-        if df_log is not None:
-            df_log = xp.asarray(df_log)
-    else:
-        eval_mask = xp.asarray(eval_mask, dtype=bool)
-        freq_indices = xp.where(eval_mask)[0]
-        n_eval = int(freq_indices.size)
-        df_log = None
-
-    target_curve = xp.asarray(target_curve)
-    float_dtype = z_pdn_batch.real.dtype
-
-    if df_log is None and n_eval >= 2:
-        if f_grid is None:
-            f_eval = xp.arange(n_eval, dtype=float_dtype) + 1.0
-        else:
-            f_eval = xp.asarray(f_grid)[freq_indices].astype(float_dtype, copy=False)
-        df_log = xp.log10(f_eval[1:] / f_eval[:-1])
-        df_log = xp.where(xp.isfinite(df_log) & (df_log > 0), df_log, 0.0)
-
-    total_parts = count_vectors.sum(axis=1)
-    score_parts = safe_divide(
-        total_parts.astype(float_dtype),
-        max(1, config.max_total_parts),
-        0.0,
-        xp,
-    )
-    score_parts = xp.minimum(score_parts, 1.0)
+    total_parts = counts.sum(axis=1).astype(real_dtype)
+    comps['parts'] = total_parts / PARTS_REFERENCE
+    n_types = xp.count_nonzero(counts > 0, axis=1).astype(real_dtype)
+    comps['num_types'] = n_types / TYPES_REFERENCE
 
     if n_eval == 0:
-        penalty = xp.full(z_pdn_batch.shape[0], 1.0, dtype=float_dtype)
-        zeros = xp.zeros_like(penalty)
-        return {
-            'max': penalty.copy(),
-            'area': penalty.copy(),
-            'mean': penalty.copy(),
-            'anti': penalty.copy(),
-            'flat': penalty.copy(),
-            'under': zeros,
-            'parts': score_parts,
-        }
+        for name in IMPEDANCE_COMPONENTS:
+            comps[name] = xp.zeros(n_batch, dtype=real_dtype)
+        return comps
 
-    z_eval = xp.abs(z_pdn_batch)[:, freq_indices]
-    t_eval = xp.maximum(target_curve[freq_indices], 1e-18)
-    ratio = z_eval / t_eval
-    ratio_clipped = xp.maximum(ratio, 1e-12)
+    w = eval_metadata['weights']
+    e = xp.log10(xp.maximum(xp.abs(z[:, eval_metadata['indices']]), 1e-30)) - eval_metadata['log_target']
+    e = e.astype(real_dtype, copy=False)
 
-    # 最大インピーダンス比（目標インピーダンスに対する最大値）
-    score_max = xp.minimum(ratio_clipped.max(axis=1), 50.0)
+    s = (xp.maximum(e, -UNIT_DECADE) + UNIT_DECADE) / UNIT_DECADE
+    comps['max'] = s.max(axis=1)
+    comps['mean'] = s @ w
+    comps['area'] = xp.maximum(e, 0.0) @ w / UNIT_DECADE
 
-    # 平均インピーダンス比（対数周波数での重み付き平均）
-    # 対数周波数スケールでは各周波数点の重要度が異なるため、周波数区間の対数幅で重み付け
-    weights_normalized = None  # 初期化（flatスコアでも使用）
+    e_mean = e @ w
+    comps['flat'] = xp.sqrt(xp.maximum(((e - e_mean[:, None]) ** 2) @ w, 0.0)) / UNIT_DECADE
 
-    if n_eval >= 2:
-        # 各周波数点の重み = その周波数区間の対数幅の割合
-        weights = xp.zeros(n_eval, dtype=float_dtype)
-        weights[0] = df_log[0] if df_log.size > 0 else 0.0
-        weights[1:-1] = 0.5 * (df_log[:-1] + df_log[1:]) if df_log.size > 1 else 0.0
-        weights[-1] = df_log[-1] if df_log.size > 0 else 0.0
+    if n_eval >= 3:
+        window = int(eval_metadata['window'])
+        inner = slice(1, -1)
+        center = e[:, inner]
+        ignore_safe = bool(config.ignore_safe_anti_resonance)
 
-        total_weight = xp.maximum(weights.sum(), 1e-12)
-        weights_normalized = weights / total_weight
+        # 反共振ピーク: 局所最大点の、左右窓内の谷底のうち高い方からの突出量
+        is_peak = (center >= e[:, :-2]) & (center > e[:, 2:])
+        left_min = _sliding_extreme(e, window, "min", "left", xp)[:, inner]
+        right_min = _sliding_extreme(e, window, "min", "right", xp)[:, inner]
+        prominence = center - xp.maximum(left_min, right_min)
+        valid = is_peak & (prominence > PEAK_MIN_DECADE)
+        if ignore_safe:
+            valid &= center > 0.0
+        comps['anti'] = xp.where(valid, prominence, 0.0).sum(axis=1) / UNIT_DECADE
 
-        # 重み付き平均
-        score_mean_raw = (ratio_clipped * weights_normalized).sum(axis=1)
+        # 共振の谷: 局所最小点の、左右窓内の肩のうち低い方からの深さ
+        is_dip = (center <= e[:, :-2]) & (center < e[:, 2:])
+        left_max = _sliding_extreme(e, window, "max", "left", xp)[:, inner]
+        right_max = _sliding_extreme(e, window, "max", "right", xp)[:, inner]
+        shoulder = xp.minimum(left_max, right_max)
+        depth = shoulder - center
+        valid = is_dip & (depth > PEAK_MIN_DECADE)
+        if ignore_safe:
+            valid &= shoulder > 0.0
+        comps['resonance'] = xp.where(valid, depth, 0.0).sum(axis=1) / UNIT_DECADE
     else:
-        # 点数が少ない場合は単純平均
-        score_mean_raw = ratio_clipped.mean(axis=1)
+        comps['anti'] = xp.zeros(n_batch, dtype=real_dtype)
+        comps['resonance'] = xp.zeros(n_batch, dtype=real_dtype)
 
-    score_mean = xp.minimum(score_mean_raw, 50.0)
-
-    # 目標超過面積（area）：目標インピーダンスを超えた部分の面積
-    # 台形積分で対数周波数スケールの面積を計算
-    excess = xp.maximum(ratio_clipped - 1.0, 0.0)
-    if n_eval >= 2:
-        traps = 0.5 * (excess[:, :-1] + excess[:, 1:]) * df_log
-        score_area = traps.sum(axis=1)
-
-        # 目標未達面積（under）：目標インピーダンスを下回った部分の面積
-        # これは良い特性なので、負の重み（weight_under < 0）で評価される
-        # スコア自体は正の値として計算し、重み付け時に負にすることで総スコアを改善
-        under_ratio = xp.maximum(1.0 - ratio_clipped, 0.0)
-        under_traps = 0.5 * (under_ratio[:, :-1] + under_ratio[:, 1:]) * df_log
-        score_under = under_traps.sum(axis=1)
-    else:
-        score_area = excess[:, 0]
-        score_under = xp.maximum(1.0 - ratio_clipped[:, 0], 0.0)
-
-    score_area = xp.minimum(score_area, 50.0)
-    score_under = xp.minimum(score_under, 50.0)
-
-    # 反共振評価（ピークの高さと鋭さを考慮）
-    if n_eval > 2:
-        center = ratio_clipped[:, 1:-1]
-        left = ratio_clipped[:, :-2]
-        right = ratio_clipped[:, 2:]
-
-        # ローカルピークを検出
-        peak_mask = (center > left) & (center > right)
-        peak_vals = xp.where(peak_mask, center, 0.0)
-        peak_excess = xp.maximum(peak_vals - 1.0, 0.0)
-
-        # ignore_safe_anti_resonanceフラグ：目標以下のピークを無視
-        if getattr(config, 'ignore_safe_anti_resonance', False):
-            peak_excess = xp.where(peak_vals <= 1.0, 0.0, peak_excess)
-
-        # ピークの鋭さを評価（周辺との高さ比）
-        # sharpness = (center - neighbor_mean) / neighbor_mean
-        neighbor_mean = 0.5 * (left + right)
-        sharpness = safe_divide(
-            center - neighbor_mean,
-            xp.maximum(neighbor_mean, 1e-12),
-            0.0,
-            xp
-        )
-        # 鋭さは正の値のみ考慮（ピークの場合のみ）
-        sharpness = xp.where(peak_mask, xp.maximum(sharpness, 0.0), 0.0)
-
-        # スコア計算：ピーク高さに鋭さの重みを加える
-        # ピークが鋭いほど悪い特性として評価
-        sharpness_weight = 0.5  # 鋭さの重み係数
-        weighted_peak_excess = peak_excess * (1.0 + sharpness_weight * sharpness)
-
-        # 総スコア = 重み付きピーク高さの合計
-        score_anti = weighted_peak_excess.sum(axis=1)
-    else:
-        score_anti = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
-
-    score_anti = xp.minimum(score_anti, 50.0)
-
-    # 平滑さ評価（対数周波数での重み付き標準偏差と変動係数）
-    # 周波数特性の平坦性を評価：変動が大きいほど悪い特性
-    if n_eval >= 2 and weights_normalized is not None:
-        # 対数周波数での重み付き標準偏差
-        weighted_mean = score_mean_raw[:, xp.newaxis]  # ブロードキャスト用に次元追加
-
-        # 各点の偏差を計算
-        deviation = ratio_clipped - weighted_mean
-
-        # 重み付き分散
-        weighted_variance = (weights_normalized * deviation ** 2).sum(axis=1)
-
-        # 重み付き標準偏差
-        weighted_std = xp.sqrt(xp.maximum(weighted_variance, 0.0))
-
-        # 変動係数（CV: Coefficient of Variation）
-        score_flat = safe_divide(
-            weighted_std,
-            xp.maximum(score_mean_raw, 1e-12),
-            0.0,
-            xp,
-        )
-    else:
-        # 点数が少ない場合は単純な変動係数
-        score_flat = safe_divide(
-            ratio_clipped.std(axis=1),
-            xp.maximum(score_mean_raw, 1e-12),
-            0.0,
-            xp,
-        )
-
-    score_flat = xp.minimum(score_flat, 10.0)
-
-    # コンデンサ種類数（正規化）
-    num_types = xp.count_nonzero(count_vectors > 0, axis=1).astype(float_dtype, copy=False)
-    score_num_types = safe_divide(
-        num_types,
-        max(1, count_vectors.shape[1]),
-        0.0,
-        xp,
-    )
-
-    # レゾナンス評価（谷の深さ、鋭さ、周波数位置の重要度を考慮）
-    if n_eval > 2:
-        z_eval_local = xp.abs(z_pdn_batch)[:, freq_indices]
-        left = z_eval_local[:, :-2]
-        center_abs = z_eval_local[:, 1:-1]
-        right = z_eval_local[:, 2:]
-
-        # ローカルミニマムを検出
-        neighbor_mean = 0.5 * (left + right)
-        local_min_mask = (center_abs < left) & (center_abs < right)
-
-        # 谷の深さ（周辺と中心の比率）
-        depth_ratio = safe_divide(neighbor_mean, xp.maximum(center_abs, 1e-18), 1.0, xp) - 1.0
-        depth_ratio = xp.where(local_min_mask, xp.maximum(depth_ratio, 0.0), 0.0)
-
-        # 谷の鋭さ（両隣との高さ差の比率）
-        # 鋭い谷ほどQ値が高く、問題となりやすい
-        left_drop = safe_divide(left - center_abs, xp.maximum(center_abs, 1e-18), 0.0, xp)
-        right_drop = safe_divide(right - center_abs, xp.maximum(center_abs, 1e-18), 0.0, xp)
-        sharpness = 0.5 * (left_drop + right_drop)
-        sharpness = xp.where(local_min_mask, xp.maximum(sharpness, 0.0), 0.0)
-
-        # 周波数位置による重み付け（低周波数の谷ほど問題になりやすい）
-        if f_grid is not None:
-            f_eval_local = xp.asarray(f_grid)[freq_indices][1:-1]
-            f_L_val = float(metadata.get('f_L', freq_indices[0])) if metadata else float(freq_indices[0])
-            # 対数スケールでの周波数重み（低周波数: 1.0 → 高周波数: 0.5）
-            freq_weight = 1.0 / (1.0 + 0.5 * xp.log10(xp.maximum(f_eval_local / f_L_val, 1.0)))
-        else:
-            freq_weight = xp.ones_like(depth_ratio[0, :])
-
-        # 総合スコア = 深さ × (1 + 鋭さの重み) × 周波数重み
-        sharpness_weight = 0.3  # 鋭さの重み係数
-        weighted_depth = depth_ratio * (1.0 + sharpness_weight * sharpness) * freq_weight
-
-        score_resonance = xp.minimum(weighted_depth.sum(axis=1), 50.0)
-    else:
-        score_resonance = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
-
-    # Improvement評価（デカップリングコンデンサなし（Without Decap）との比較）
-    # デカップリングコンデンサの追加によってインピーダンスが悪化した部分を検出
-    if z_without_decap is not None:
-        z_without_decap = xp.asarray(z_without_decap)
-        z_base_eval = xp.abs(z_without_decap)[freq_indices]
-
-        # 悪化比率を計算：z_pdn / z_without_decap
-        # 1.0より大きい部分 = デカップリングコンデンサによって悪化した部分
-        degradation_ratio = safe_divide(z_eval, xp.maximum(z_base_eval, 1e-18), 1.0, xp)
-        degradation_excess = xp.maximum(degradation_ratio - 1.0, 0.0)
-
-        # 悪化部分の面積を台形積分で計算
-        if n_eval >= 2:
-            degrade_traps = 0.5 * (degradation_excess[:, :-1] + degradation_excess[:, 1:]) * df_log
-            score_improvement = degrade_traps.sum(axis=1)
-        else:
-            score_improvement = degradation_excess[:, 0]
-
-        score_improvement = xp.minimum(score_improvement, 50.0).astype(float_dtype, copy=False)
-
-        # 低改善度帯域の評価
-        # improvement_ratio = 1.0 - (z_pdn / z_without_decap) で改善度を定義
-        # 改善度が閾値未満の帯域はデカップリングコンデンサの効果が不十分
-        improvement_ratio = 1.0 - degradation_ratio
-        threshold = float(getattr(config, 'low_improvement_threshold', 0.15))
-
-        # 改善度が閾値未満の部分を検出（0.0 <= improvement_ratio < threshold）
-        # 悪化部分（improvement_ratio < 0）は既にimprovementスコアで評価済みなので除外
-        low_improvement_mask = (improvement_ratio >= 0.0) & (improvement_ratio < threshold)
-        low_improvement_value = xp.where(low_improvement_mask, threshold - improvement_ratio, 0.0)
-
-        # 低改善度帯域の面積を台形積分で計算
-        if n_eval >= 2:
-            low_imp_traps = 0.5 * (low_improvement_value[:, :-1] + low_improvement_value[:, 1:]) * df_log
-            score_low_improvement = low_imp_traps.sum(axis=1)
-        else:
-            score_low_improvement = low_improvement_value[:, 0]
-
-        score_low_improvement = xp.minimum(score_low_improvement, 50.0).astype(float_dtype, copy=False)
-    else:
-        # Without Decapデータがない場合は評価なし
-        score_improvement = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
-        score_low_improvement = xp.zeros(ratio_clipped.shape[0], dtype=float_dtype)
-
-    return {
-        'max': score_max.astype(float_dtype, copy=False),
-        'area': score_area.astype(float_dtype, copy=False),
-        'mean': score_mean.astype(float_dtype, copy=False),
-        'anti': score_anti.astype(float_dtype, copy=False),
-        'flat': score_flat.astype(float_dtype, copy=False),
-        'under': score_under.astype(float_dtype, copy=False),
-        'parts': score_parts.astype(float_dtype, copy=False),
-        'num_types': score_num_types.astype(float_dtype, copy=False),
-        'resonance': score_resonance.astype(float_dtype, copy=False),
-        'improvement': score_improvement,
-        'low_improvement': score_low_improvement,
-    }
+    return {name: value.astype(real_dtype, copy=False) for name, value in comps.items()}
 
 
-def calculate_score_components(
-    z_pdn: np.ndarray,
-    target_curve: np.ndarray,
-    eval_mask: np.ndarray,
-    count_vector: np.ndarray,
-    config: UserConfig,
-    xp: Any = np,
-    f_grid: Optional[np.ndarray] = None,
-    eval_metadata: Optional[Dict[str, Any]] = None,
-    z_without_decap: Optional[Any] = None,
-) -> Dict[str, float]:
-    """単一組み合わせのスコアコンポーネント"""
-
-    batch = calculate_score_components_batch(
-        z_pdn,
-        target_curve,
-        eval_mask,
-        count_vector,
-        config,
-        xp,
-        f_grid,
-        eval_metadata=eval_metadata,
-        z_without_decap=z_without_decap,
-    )
-
-    return {
-        key: float(transfer_to_host(val)[0])
-        for key, val in batch.items()
-    }
+def weighted_sum(components: Dict[str, Any], config: UserConfig,
+                 names: Tuple[str, ...] = SCORE_COMPONENTS) -> Any:
+    """成分の重み付き和（存在しない成分は0扱い）"""
+    total = None
+    for name in names:
+        if name not in components:
+            continue
+        term = float(getattr(config, f"weight_{name}")) * components[name]
+        total = term if total is None else total + term
+    return total
 
 
 def evaluate_combinations(
-    z_pdn_batch: np.ndarray,
-    target_curve: np.ndarray,
-    eval_mask: np.ndarray,
-    count_vectors: np.ndarray,
+    z_pdn_batch: Any,
+    count_vectors: Any,
+    eval_metadata: Dict[str, Any],
     config: UserConfig,
     xp: Any = np,
-    f_grid: Optional[np.ndarray] = None,
-    eval_metadata: Optional[Dict[str, Any]] = None,
-    z_without_decap: Optional[Any] = None,
+) -> Tuple[Any, Dict[str, Any]]:
+    """
+    バッチの公称スコアを計算する（小さいほど良い）
+
+    Returns:
+        (scores (B,), components {成分名: (B,)})
+    """
+    comps = calculate_score_components_batch(z_pdn_batch, count_vectors, eval_metadata, config, xp)
+    return weighted_sum(comps, config), comps
+
+
+def extract_top_k(
+    scores: Any,
+    k: int,
+    xp: Any = np,
+    threshold: Optional[float] = None,
 ) -> np.ndarray:
     """
-    バッチ評価（小さいほど良い）。
-    """
-    comps = calculate_score_components_batch(
-        z_pdn_batch,
-        target_curve,
-        eval_mask,
-        count_vectors,
-        config,
-        xp,
-        f_grid,
-        eval_metadata=eval_metadata,
-        z_without_decap=z_without_decap,
-    )
+    スコア上位k件（昇順）のインデックスをホスト配列で返す
 
-    total = (
-        config.weight_max   * comps['max'] +
-        config.weight_area  * comps['area'] +
-        config.weight_mean  * comps['mean'] +
-        config.weight_anti  * comps['anti'] +
-        config.weight_flat  * comps['flat'] +
-        config.weight_parts * comps['parts'] +
-        config.weight_under * comps['under'] +
-        config.weight_num_types * comps['num_types'] +
-        config.weight_resonance * comps['resonance'] +
-        config.weight_improvement * comps['improvement'] +
-        config.weight_low_improvement * comps['low_improvement']
-    )
-
-    return total.astype(xp.float32, copy=False)
-
-
-def extract_top_k(z_pdn_batch: np.ndarray,
-                 scores: np.ndarray,
-                 count_vectors: np.ndarray,
-                 k: int,
-                 xp: Any = np) -> List[Dict]:
-    """
-    上位k個の組み合わせを抽出
-    
     Args:
-        z_pdn_batch: PDNインピーダンスバッチ
-        scores: スコア配列
-        count_vectors: カウントベクトル
+        scores: (B,) スコア
         k: 抽出数
-        xp: バックエンドモジュール
-    
-    Returns:
-        上位k個の結果リスト
+        threshold: これ以上のスコアは除外（グローバルtop_kに入り得ない候補の足切り）
     """
-    n_batch = len(scores)
-    k = min(k, n_batch)
-    
-    if k == 0:
-        return []
-    
-    # スコアでソート（昇順）
+    n = int(scores.shape[0])
+    k = min(int(k), n)
+    if k <= 0:
+        return np.zeros(0, dtype=np.int64)
     if xp is np:
-        # NumPyの場合
-        if k < n_batch:
-            indices = np.argpartition(scores, k - 1)[:k]
-            indices = indices[np.argsort(scores[indices])]
-        else:
-            indices = np.argsort(scores)[:k]
+        idx = np.argpartition(scores, k - 1)[:k] if k < n else np.arange(n)
+        idx = idx[np.argsort(scores[idx])]
     else:
-        # CuPyの場合（フルソート使用）。以降の処理はCPU側で実施
-        sorted_indices = xp.argsort(scores)[:k]
-        indices = transfer_to_host(sorted_indices)
-
-    indices = np.asarray(indices, dtype=np.int64)
-    
-    # 結果を構築
-    top_k_results = []
-    for rank, idx in enumerate(indices, start=1):
-        idx_int = int(idx)
-        if hasattr(scores, '__cuda_array_interface__'):
-            score_value = transfer_to_host(scores[idx_int])
-        else:
-            score_value = scores[idx_int]
-
-        if np.isscalar(score_value):
-            score_float = float(score_value)
-        else:
-            score_float = float(np.asarray(score_value).item())
-
-        result = {
-            'count_vector': count_vectors[idx_int],
-            'z_pdn': z_pdn_batch[idx_int],
-            'total_score': score_float,
-            'rank': rank
-        }
-        top_k_results.append(result)
-    
-    return top_k_results
+        # CuPyのargpartitionは内部で全体ソート相当+unravelとなり遅いため、全体のargsortを使う
+        idx = xp.argsort(scores)[:k]
+    idx_host = transfer_to_host(idx).astype(np.int64)
+    if threshold is not None:
+        score_host = transfer_to_host(scores[idx])
+        idx_host = idx_host[score_host < threshold]
+    return idx_host
 
 
-def monte_carlo_evaluation(top_k_results: List[Dict],
-                          capacitor_impedances: Dict[str, np.ndarray],
-                          capacitor_indices: np.ndarray,
-                          f_grid: np.ndarray,
-                          eval_mask: np.ndarray,
-                          target_mask: np.ndarray,
-                          config: UserConfig,
-                          xp: Any = np,
-                          pdn_assets: Optional[Dict[str, Any]] = None,
-                          eval_metadata: Optional[Dict[str, Any]] = None,
-                          z_without_decap: Optional[Any] = None) -> np.ndarray:
+def monte_carlo_worst(
+    count_vectors: Any,
+    nominal_components: Dict[str, Any],
+    prepared: Dict[str, Any],
+    eval_metadata: Dict[str, Any],
+    config: UserConfig,
+    xp: Any = np,
+) -> Any:
     """
-    Monte Carlo法でロバスト性を評価
-    
+    Monte Carlo最悪悪化量（mc_worst成分）を計算する
+
+    各候補について mc_samples 個の公差サンプルの Z_pdn を求め、インピーダンス成分の
+    重み付き和の最大値と公称値の差（0未満は0）を返す。
+
     Args:
-        top_k_results: top_k結果リスト
-        capacitor_impedances: コンデンサインピーダンス
-        capacitor_indices: コンデンサインデックス
-        f_grid: 周波数グリッド
-        eval_mask: 評価帯域マスク
-        target_mask: 目標マスク
-        config: ユーザー設定
-        xp: バックエンドモジュール
-        pdn_assets: 事前計算済みPDN要素（オプション）
-    
+        count_vectors: (K, T) 候補
+        nominal_components: 候補の公称成分 {成分名: (K,)}
+        prepared: pdn.prepare_pdn_components の結果
     Returns:
-        MC最悪値スコア配列
+        (K,) 実数配列
     """
-    if not config.mc_enable or len(top_k_results) == 0:
-        return xp.zeros(len(top_k_results), dtype=xp.float32 if xp is not np else np.float32)
-    
-    prepared = pdn_assets if pdn_assets is not None else prepare_pdn_components(
-        capacitor_impedances,
-        config,
-        f_grid,
-        xp,
-        getattr(config, 'dtype_c', 'complex64'),
+    counts = xp.asarray(count_vectors)
+    n_combo = int(counts.shape[0])
+    n_samples = int(config.mc_samples)
+    if not config.mc_enable or n_combo == 0 or n_samples <= 0:
+        return xp.zeros(n_combo, dtype=prepared['omega'].dtype)
+
+    z_mc = calculate_pdn_impedance_monte_carlo(counts, prepared, config, n_samples, xp)
+    flat_counts = xp.repeat(counts, n_samples, axis=0)
+    comps = calculate_score_components_batch(
+        z_mc.reshape(n_combo * n_samples, -1), flat_counts, eval_metadata, config, xp
     )
-
-    mc_worst_scores: List[float] = []
-    
-    for result in top_k_results:
-        count_vector = result['count_vector']
-        count_vector_backend = xp.asarray(count_vector)
-        
-        # Monte Carloサンプリング
-        z_pdn_mc = calculate_pdn_impedance_monte_carlo(
-            count_vector,
-            capacitor_impedances,
-            capacitor_indices,
-            f_grid,
-            config,
-            config.mc_samples,
-            xp,
-            prepared=prepared,
-        )
-        
-        # 各サンプルのスコア計算
-        repeated_counts = xp.broadcast_to(
-            count_vector_backend[xp.newaxis, :],
-            (config.mc_samples, count_vector_backend.shape[0])
-        )
-        mc_scores = evaluate_combinations(
-            z_pdn_mc,
-            target_mask,
-            eval_mask,
-            repeated_counts,
-            config,
-            xp,
-            f_grid,
-            eval_metadata=eval_metadata,
-            z_without_decap=z_without_decap,
-        )
-
-        # 最悪値（最大スコア）を記録
-        worst_score_val = transfer_to_host(xp.max(mc_scores))
-        worst_score = float(np.asarray(worst_score_val).item() if not np.isscalar(worst_score_val) else worst_score_val)
-        mc_worst_scores.append(worst_score)
-        
-        # 統計情報をログ
-        mean_val = transfer_to_host(xp.mean(mc_scores))
-        std_val = transfer_to_host(xp.std(mc_scores))
-        mean_float = float(np.asarray(mean_val).item() if not np.isscalar(mean_val) else mean_val)
-        std_float = float(np.asarray(std_val).item() if not np.isscalar(std_val) else std_val)
-        logger.debug(f"MC評価 - 平均: {mean_float:.6f}, 最悪: {worst_score:.6f}, std: {std_float:.6f}")
-    
-    return xp.asarray(mc_worst_scores, dtype=xp.float32 if xp is not np else np.float32)
+    mc_imp = weighted_sum(comps, config, IMPEDANCE_COMPONENTS).reshape(n_combo, n_samples)
+    nominal_imp = weighted_sum(
+        {name: xp.asarray(nominal_components[name]) for name in IMPEDANCE_COMPONENTS},
+        config,
+        IMPEDANCE_COMPONENTS,
+    )
+    return xp.maximum(mc_imp.max(axis=1) - nominal_imp, 0.0)
 
 
-def format_combination_name(count_vector: np.ndarray,
-                          capacitor_names: List[str]) -> str:
+def format_combination_name(count_vector: Any, capacitor_names: List[str]) -> str:
     """
     組み合わせを文字列表現にフォーマット
 
-    Args:
-        count_vector: カウントベクトル（各コンデンサの使用個数）
-        capacitor_names: コンデンサ名リスト
-
-    Returns:
-        フォーマット済み文字列
-
     Examples:
-        >>> count_vec = np.array([2, 0, 3, 1])
-        >>> cap_names = ["C1_0.1uF", "C2_0.22uF", "C3_1uF", "C4_10uF"]
-        >>> format_combination_name(count_vec, cap_names)
-        '(C1_0.1uF)x2 + (C3_1uF)x3 + (C4_10uF) (Total: 6)'
-
-        >>> count_vec = np.array([1, 0, 0, 0])
-        >>> cap_names = ["C1_0.1uF", "C2_0.22uF", "C3_1uF", "C4_10uF"]
-        >>> format_combination_name(count_vec, cap_names)
-        '(C1_0.1uF) (Total: 1)'
-
-        >>> count_vec = np.array([0, 0, 0, 0])
-        >>> cap_names = ["C1_0.1uF", "C2_0.22uF", "C3_1uF", "C4_10uF"]
-        >>> format_combination_name(count_vec, cap_names)
+        >>> format_combination_name(np.array([2, 0, 3, 1]), ["C1", "C2", "C3", "C4"])
+        '(C1)x2 + (C3)x3 + (C4)'
+        >>> format_combination_name(np.array([0, 0]), ["C1", "C2"])
         'Empty'
     """
     parts = []
-    total = 0
-
-    for i, name in enumerate(capacitor_names):
-        count = int(count_vector[i])
-        if count > 0:
-            if count == 1:
-                parts.append(f"({name})")
-            else:
-                parts.append(f"({name})x{count}")
-            total += count
-
-    if parts:
-        combo_str = " + ".join(parts)
-        # return f"{combo_str} (Total: {total})"
-        return combo_str
-    else:
-        return "Empty"
-
-
-def summarize_results(top_k_results: List[Dict],
-                     capacitor_names: List[str],
-                     config: UserConfig) -> List[Dict]:
-    """
-    結果をサマリー形式に整理
-    
-    Args:
-        top_k_results: top_k結果
-        capacitor_names: コンデンサ名リスト
-        config: ユーザー設定
-    
-    Returns:
-        整理された結果リスト
-    """
-    summaries = []
-    
-    for result in top_k_results:
-        count_vector = result['count_vector']
-        
-        # CPU変換（必要な場合）
-        if hasattr(count_vector, '__cuda_array_interface__'):
-            count_vector = transfer_to_host(count_vector)
-        
-        summary = {
-            'rank': result['rank'],
-            'combination': format_combination_name(count_vector, capacitor_names),
-            'total_score': result['total_score'],
-            'count_vector': count_vector,
-            'total_parts': int(np.sum(count_vector))
-        }
-        
-        # MC最悪値がある場合
-        if 'mc_worst_score' in result:
-            summary['mc_worst_score'] = result['mc_worst_score']
-        
-        summaries.append(summary)
-    
-    return summaries
-
-
-def compare_combinations(combo1: Dict, combo2: Dict,
-                        tolerance: float = 1e-6) -> bool:
-    """
-    2つの組み合わせが同一かチェック
-    
-    Args:
-        combo1: 組み合わせ1
-        combo2: 組み合わせ2
-        tolerance: 許容誤差
-    
-    Returns:
-        同一ならTrue
-    """
-    # カウントベクトルの比較
-    cv1 = combo1.get('count_vector')
-    cv2 = combo2.get('count_vector')
-    
-    if cv1 is None or cv2 is None:
-        return False
-    
-    # CPU変換
-    cv1 = transfer_to_host(cv1)
-    cv2 = transfer_to_host(cv2)
-    
-    # 配列比較
-    if cv1.shape != cv2.shape:
-        return False
-    
-    return np.allclose(cv1, cv2, rtol=tolerance, atol=tolerance)
+    for name, count in zip(capacitor_names, np.asarray(count_vector).tolist()):
+        count = int(count)
+        if count == 1:
+            parts.append(f"({name})")
+        elif count > 1:
+            parts.append(f"({name})x{count}")
+    return " + ".join(parts) if parts else "Empty"

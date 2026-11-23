@@ -1,13 +1,22 @@
 import traceback
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict
 import numpy as np
 import xlsxwriter
 
-from deca_auto.config import UserConfig
-from deca_auto.utils import logger, ensure_numpy, decimate, get_custom_mask_freq_range
-from deca_auto.evaluator import format_combination_name, calculate_score_components
+from deca_auto.config import UserConfig, WEIGHT_FIELDS
+from deca_auto.utils import (
+    logger, ensure_numpy, create_decimated_indices, get_custom_mask_freq_range,
+)
+from deca_auto.evaluator import format_combination_name
+
+
+COMPONENT_KEYS = tuple(field.removeprefix("weight_") for field in WEIGHT_FIELDS)
+COMPONENT_HEADERS = [
+    "MC Worst" if key == "mc_worst" else key.replace("_", " ").title()
+    for key in COMPONENT_KEYS
+]
 
 
 ZPDN_PALETTE = [
@@ -115,9 +124,11 @@ def write_summary_sheet(worksheet, results: Dict, config: UserConfig,
                        header_format, cell_format):
     """サマリーシートを作成"""
     
+    headers = ["Rank", "Combination", "Total Score", "Parts Count", "Types Count", *COMPONENT_HEADERS]
+    last_col = len(headers) - 1
+
     # タイトル
-    worksheet.write(0, 0, "PDN Impedance Optimization Results", header_format)
-    worksheet.merge_range(0, 0, 0, 5, "PDN Impedance Optimization Results", header_format)
+    worksheet.merge_range(0, 0, 0, last_col, "PDN Impedance Optimization Results", header_format)
     
     # 基本情報
     row = 2
@@ -135,13 +146,10 @@ def write_summary_sheet(worksheet, results: Dict, config: UserConfig,
     
     # Top-kサマリー
     row += 2
-    worksheet.write(row, 0, "Top-k Results Summary", header_format)
-    worksheet.merge_range(row, 0, row, 5, "Top-k Results Summary", header_format)
+    worksheet.merge_range(row, 0, row, last_col, "Top-k Results Summary", header_format)
     
     row += 1
-    headers = ["Rank", "Combination", "Total Score", "Parts Count", "Num Types", "MC Worst"]
-    for col, header in enumerate(headers):
-        worksheet.write(row, col, header, header_format)
+    worksheet.write_row(row, 0, headers, header_format)
     
     # Top-k結果
     top_k = results.get('top_k_results', [])
@@ -158,107 +166,47 @@ def write_summary_sheet(worksheet, results: Dict, config: UserConfig,
         worksheet.write(row, 3, int(np.sum(count_vec)), cell_format)
         worksheet.write(row, 4, int(np.count_nonzero(count_vec)), cell_format)
 
-        if 'mc_worst_score' in result:
-            worksheet.write(row, 5, f"{result['mc_worst_score']:.6f}", cell_format)
-        else:
-            worksheet.write(row, 5, "N/A", cell_format)
+        _write_score_components(worksheet, row, 5, result, cell_format)
     
     # 列幅調整
     worksheet.set_column(0, 0, 10)
     worksheet.set_column(1, 1, 60)
-    worksheet.set_column(2, 5, 15)
+    worksheet.set_column(2, last_col, 15)
+
+
+def _write_score_components(worksheet, row, first_col, result, cell_format):
+    """評価済みのスコア内訳を設定の重みと同じ順序で出力する。"""
+    components = result.get('components') or {}
+    for col, key in enumerate(COMPONENT_KEYS, first_col):
+        worksheet.write(row, col, components.get(key, "N/A"), cell_format)
 
 
 def write_detail_sheet(worksheet, results: Dict, config: UserConfig,
                      header_format, cell_format, number_format):
     """詳細データシートを作成"""
-    
-    # ヘッダー
-    row = 0
-    worksheet.write(row, 0, "Detailed Score Components", header_format)
-    worksheet.merge_range(row, 0, row, 10, "Detailed Score Components", header_format)
-    
-    row += 1
-    headers = [
-        "Rank",
-        "Combination",
-        "Total",
-        "Max",
-        "Area",
-        "Mean",
-        "Anti",
-        "Resonance",
-        "Flat",
-        "Under",
-        "Parts",
-        "Num Types Ratio",
-        "MC Worst"
-    ]
-    for col, header in enumerate(headers):
-        worksheet.write(row, col, header, header_format)
-    
-    # データ
+    headers = ["Rank", "Combination", "Total", *COMPONENT_HEADERS]
+    last_col = len(headers) - 1
+    worksheet.merge_range(0, 0, 0, last_col, "Detailed Score Components", header_format)
+    worksheet.write_row(1, 0, headers, header_format)
+
     top_k = results.get('top_k_results', [])
     cap_names = results.get('capacitor_names', [])
-    f_grid = ensure_numpy(results.get('frequency_grid', []))
-    target_mask = ensure_numpy(results.get('target_mask', []))
-    
-    # 評価帯域マスク再構築
-    eval_f_L, eval_f_H = config.f_L, config.f_H
-    # カスタムマスクモードの時のみカスタムマスクの帯域を評価帯域として使用
-    if config.target_impedance_mode == "custom" and config.z_custom_mask:
-        custom_f_L, custom_f_H = get_custom_mask_freq_range(config.z_custom_mask)
-        if custom_f_L is not None and custom_f_H is not None:
-            eval_f_L, eval_f_H = custom_f_L, custom_f_H
-    
-    eval_mask = (f_grid >= eval_f_L) & (f_grid <= eval_f_H)
-    eval_metadata = results.get('eval_metadata')
-    
     for i, result in enumerate(top_k[:config.top_k]):
-        row += 1
+        row = i + 2
         count_vec = ensure_numpy(result['count_vector'])
         combo_str = format_combination_name(count_vec, cap_names)
-        
-        # スコアコンポーネント再計算
-        z_pdn = ensure_numpy(result['z_pdn'])
-        components = calculate_score_components(
-            z_pdn,
-            target_mask,
-            eval_mask,
-            count_vec,
-            config,
-            np,
-            f_grid=f_grid,
-            eval_metadata=eval_metadata,
-        )
-        
-        worksheet.write(row, 0, result.get('rank', i+1), cell_format)
+        worksheet.write(row, 0, result.get('rank', i + 1), cell_format)
         worksheet.write(row, 1, combo_str, cell_format)
-        worksheet.write(row, 2, f"{result['total_score']:.6f}", number_format)
-        worksheet.write(row, 3, f"{components['max']:.6f}", number_format)
-        worksheet.write(row, 4, f"{components['area']:.6f}", number_format)
-        worksheet.write(row, 5, f"{components['mean']:.6f}", number_format)
-        worksheet.write(row, 6, f"{components['anti']:.6f}", number_format)
-        worksheet.write(row, 7, f"{components['resonance']:.6f}", number_format)
-        worksheet.write(row, 8, f"{components['flat']:.6f}", number_format)
-        worksheet.write(row, 9, f"{components['under']:.6f}", number_format)
-        worksheet.write(row, 10, f"{components['parts']:.6f}", number_format)
-        worksheet.write(row, 11, f"{components['num_types']:.6f}", number_format)
+        worksheet.write(row, 2, result['total_score'], number_format)
+        _write_score_components(worksheet, row, 3, result, number_format)
 
-        if 'mc_worst_score' in result:
-            worksheet.write(row, 12, f"{result['mc_worst_score']:.6f}", number_format)
-        else:
-            worksheet.write(row, 12, "N/A", cell_format)
-
-    # 列幅調整
     worksheet.set_column(0, 0, 10)
     worksheet.set_column(1, 1, 60)
-    worksheet.set_column(2, 12, 12)
+    worksheet.set_column(2, last_col, 15)
 
 
 def write_zc_impedance_data(worksheet, results: Dict, header_format, number_format):
     """Z_cインピーダンスデータを書き込む"""
-    from deca_auto.utils import create_decimated_indices
 
     # ヘッダー
     row = 0
@@ -267,16 +215,16 @@ def write_zc_impedance_data(worksheet, results: Dict, header_format, number_form
 
     # コンデンサ名
     cap_impedances = results.get('capacitor_impedances', {})
-    cap_names_list = list(cap_impedances.keys())
+    z_cap_host = {name: ensure_numpy(z_c) for name, z_c in cap_impedances.items()}
 
-    for cap_name in cap_names_list:
+    for cap_name in z_cap_host:
         col += 1
         worksheet.write(row, col, f"{cap_name} |Z| [Ω]", header_format)
 
     # データ書き込み
     f_grid = ensure_numpy(results.get('frequency_grid', []))
 
-    # データを間引く（最大1000点）
+    # データを間引く（1000点を目安とする）
     indices = create_decimated_indices(len(f_grid), 1000)
 
     # データ行
@@ -288,9 +236,8 @@ def write_zc_impedance_data(worksheet, results: Dict, header_format, number_form
         worksheet.write(row, col, float(f_grid[i]), number_format)
 
         # 各コンデンサのインピーダンス
-        for cap_name in cap_names_list:
+        for z_c in z_cap_host.values():
             col += 1
-            z_c = ensure_numpy(cap_impedances[cap_name])
             if i < len(z_c):
                 z_abs = float(np.abs(z_c[i]))
                 worksheet.write(row, col, z_abs, number_format)
@@ -298,7 +245,6 @@ def write_zc_impedance_data(worksheet, results: Dict, header_format, number_form
 
 def write_impedance_data(worksheet, results: Dict, config: UserConfig, header_format, number_format):
     """PDNインピーダンスデータを書き込む"""
-    from deca_auto.utils import create_decimated_indices
 
     # ヘッダー
     row = 0
@@ -306,10 +252,10 @@ def write_impedance_data(worksheet, results: Dict, config: UserConfig, header_fo
     worksheet.write(row, col, "Frequency [Hz]", header_format)
 
     # Top-kのラベル
-    top_k = results.get('top_k_results', [])
-    cap_names = results.get('capacitor_names', [])
+    top_k = results.get('top_k_results', [])[:10]  # 最大10個
+    z_pdn_host = [ensure_numpy(result['z_pdn']) for result in top_k]
 
-    for i, result in enumerate(top_k[:10]):  # 最大10個
+    for i in range(len(top_k)):
         col += 1
         worksheet.write(row, col, f"Top-{i+1} |Z| [Ω]", header_format)
 
@@ -336,7 +282,7 @@ def write_impedance_data(worksheet, results: Dict, config: UserConfig, header_fo
         if custom_f_L is not None and custom_f_H is not None:
             eval_f_L, eval_f_H = custom_f_L, custom_f_H
 
-    # データを間引く（最大1000点）
+    # データを間引く（1000点を目安とする）
     indices = create_decimated_indices(len(f_grid), 1000)
 
     # データ行
@@ -351,9 +297,8 @@ def write_impedance_data(worksheet, results: Dict, config: UserConfig, header_fo
         worksheet.write(row, col, freq, number_format)
 
         # Top-kインピーダンス
-        for j, result in enumerate(top_k[:10]):
+        for z_pdn in z_pdn_host:
             col += 1
-            z_pdn = ensure_numpy(result['z_pdn'])
             if i < len(z_pdn):
                 z_abs = float(np.abs(z_pdn[i]))
                 worksheet.write(row, col, z_abs, number_format)
@@ -372,15 +317,16 @@ def write_impedance_data(worksheet, results: Dict, config: UserConfig, header_fo
 def create_zc_chart(workbook, chart_sheet, zc_data_sheet,
                    results: Dict, config: UserConfig):
     """Z_cインピーダンスグラフを作成"""
-    from deca_auto.utils import create_decimated_indices
 
     # グラフ作成
     chart = workbook.add_chart({'type': 'scatter', 'subtype': 'straight'})
 
     # データ範囲
     cap_impedances = results.get('capacitor_impedances', {})
-    cap_names_list = list(cap_impedances.keys())
+    cap_names_list = list(cap_impedances)
     f_grid = ensure_numpy(results.get('frequency_grid', []))
+    if not cap_names_list or not f_grid.size:
+        return
 
     # データ点数（間引き後）
     indices = create_decimated_indices(len(f_grid), 1000)
@@ -426,7 +372,6 @@ def create_zc_chart(workbook, chart_sheet, zc_data_sheet,
 def create_impedance_chart(workbook, chart_sheet, data_sheet,
                           results: Dict, config: UserConfig):
     """PDNインピーダンスグラフを作成"""
-    from deca_auto.utils import create_decimated_indices
 
     # グラフ作成
     chart = workbook.add_chart({'type': 'scatter', 'subtype': 'straight'})
@@ -434,6 +379,8 @@ def create_impedance_chart(workbook, chart_sheet, data_sheet,
     # データ範囲
     top_k = results.get('top_k_results', [])
     f_grid = ensure_numpy(results.get('frequency_grid', []))
+    if not f_grid.size:
+        return
 
     # データ点数（間引き後）
     indices = create_decimated_indices(len(f_grid), 1000)
@@ -512,19 +459,7 @@ def write_config_sheet(worksheet, config: UserConfig, header_format, cell_format
         "Evaluation Band": ["f_L", "f_H"],
         "Target": ["z_target"],
         "Search": ["max_total_parts", "min_total_parts_ratio", "top_k"],
-        "Weights": [
-            "weight_max",
-            "weight_area",
-            "weight_mean",
-            "weight_anti",
-            "weight_flat",
-            "weight_under",
-            "weight_parts",
-            "weight_num_types",
-            "weight_resonance",
-            "weight_mc_worst",
-            "ignore_safe_anti_resonance"
-        ],
+        "Weights": [*WEIGHT_FIELDS, "ignore_safe_anti_resonance"],
         "Monte Carlo": ["mc_enable", "mc_samples", "tol_C", "tol_ESR", "tol_ESL"],
         "System": ["force_numpy", "cuda", "seed"]
     }

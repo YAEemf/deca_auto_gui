@@ -130,23 +130,18 @@ class UserConfig:
     min_total_parts_ratio: float = 0.6  # 最小総数比率
     top_k: int = 15  # 上位候補数
     shuffle_evaluation: bool = True  # 評価順のシャッフル
-    buffer_limit: float = 100e6  # バッファサイズ上限
     
-    # スコア重み
-    weight_max: float = 0.6
-    weight_area: float = 2.0
-    weight_mean: float = 0.3
-    weight_anti: float = 0.1
-    weight_flat: float = 0.1
-    weight_under: float = -0.1
-    weight_parts: float = 0.1
-    weight_num_types: float = 2.0
-    weight_resonance: float = 0.1
-    weight_improvement: float = 1.0
-    weight_low_improvement: float = 2.0
-    low_improvement_threshold: float = 0.15
-    weight_mc_worst: float = 1.0
-    ignore_safe_anti_resonance: bool = False
+    # スコア重み（evaluator.pyの各スコア成分に1対1で対応。全成分は同程度のスケールに正規化済み）
+    weight_max: float = 1.0         # 帯域内ピークの目標比
+    weight_area: float = 1.0        # 目標超過量の帯域平均
+    weight_mean: float = 0.3        # 目標比の帯域平均（目標の1/2以下は飽和）
+    weight_anti: float = 0.5        # 反共振ピークの突出量
+    weight_resonance: float = 0.1   # 直列共振による急峻な谷の深さ
+    weight_flat: float = 0.1        # 目標比の平坦さ（加重標準偏差）
+    weight_parts: float = 0.5       # 部品点数
+    weight_num_types: float = 0.5   # 部品の種類数
+    weight_mc_worst: float = 1.0    # Monte Carlo最悪時のインピーダンス成分の悪化量
+    ignore_safe_anti_resonance: bool = False  # 目標以下の反共振/谷を無視
     
     # Monte Carlo設定
     mc_enable: bool = True
@@ -177,6 +172,39 @@ class UserConfig:
 
 # デフォルト設定のグローバルインスタンス
 USER_CONFIG = UserConfig()
+
+# 評価重みのフィールド（GUI/TOML/Excelで共通に使用。順序は表示順）
+WEIGHT_FIELDS: Tuple[str, ...] = (
+    "weight_max",
+    "weight_area",
+    "weight_mean",
+    "weight_anti",
+    "weight_resonance",
+    "weight_flat",
+    "weight_parts",
+    "weight_num_types",
+    "weight_mc_worst",
+)
+
+# 重みスライダーの範囲 (min, max, step)
+WEIGHT_RANGE: Tuple[float, float, float] = (0.0, 3.0, 0.05)
+
+# 廃止済みパラメーター（旧TOMLに含まれていても警告のみで無視する）
+DEPRECATED_FIELDS: Tuple[str, ...] = (
+    "weight_under",
+    "weight_improvement",
+    "weight_low_improvement",
+    "low_improvement_threshold",
+    "buffer_limit",  # 組み合わせ生成のアンランク化により不要
+)
+
+
+def default_weights() -> Dict[str, Any]:
+    """評価重みとignore_safe_anti_resonanceの初期値を返す"""
+    defaults = UserConfig()
+    values: Dict[str, Any] = {name: getattr(defaults, name) for name in WEIGHT_FIELDS}
+    values["ignore_safe_anti_resonance"] = defaults.ignore_safe_anti_resonance
+    return values
 
 
 def _load_config_field(config: UserConfig, key: str, value: Any) -> None:
@@ -253,7 +281,7 @@ def _load_config_field(config: UserConfig, key: str, value: Any) -> None:
                 z_val = parse_scientific_notation(z_raw) if isinstance(z_raw, str) else to_float(z_raw, None)
                 if f_val is not None and z_val is not None:
                     mask_list.append((f_val, z_val))
-        setattr(config, key, mask_list if mask_list else None)
+        setattr(config, key, mask_list)
 
     elif isinstance(value, str) and key.startswith(("f_", "R_", "L_", "C_", "z_", "tol_", "tan_", "dc_", "mlcc_", "max_vram_", "min_total_", "weight_", "v_", "i_", "ripple_", "switching_", "design_")):
         try:
@@ -265,69 +293,64 @@ def _load_config_field(config: UserConfig, key: str, value: Any) -> None:
         setattr(config, key, value)
 
 
-def load_config(config_path: Optional[Union[str, Path]] = None, verbose: bool = True) -> UserConfig:
-    """
-    TOMLファイルから設定を読み込む
+# TOML has no null value. Record explicit omissions alongside the regular values.
+_OPTIONAL_FIELDS = {"z_custom_mask", "ripple_ratio", "ripple_voltage", "switching_activity", "i_transient"}
 
-    Args:
-        config_path: 設定ファイルパス（Noneの場合はデフォルト設定を使用）
-        verbose: デバッグログの出力フラグ
 
-    Returns:
-        UserConfig: 読み込んだ設定
-    """
+def load_config(
+    config_path: Optional[Union[str, Path]] = None,
+    verbose: bool = True,
+    *,
+    strict: bool = False,
+) -> UserConfig:
+    """TOMLを読み込む。strict=Trueの場合はファイルの読み込みエラーを通知する。"""
     config = UserConfig()
-
     if config_path is None:
         return config
 
-    config_path = Path(config_path)
-    if not config_path.exists():
-        print(f"設定ファイルが見つかりません: {config_path}")
-        return config
-
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            toml_data = tomlkit.load(f)
+        with Path(config_path).open(encoding="utf-8") as file:
+            data = tomlkit.load(file).unwrap()
 
-        # デバッグ: 読み込んだTOMLデータの構造を確認
-        if verbose:
-            print(f"=== TOMLデータ読み込み開始: {config_path} ===")
-            print(f"トップレベルキー: {list(toml_data.keys())}")
-
-        # TOMLデータで設定を上書き（セクション構造に対応）
-        for section_or_key, raw_value in toml_data.items():
-            value = unwrap_toml_value(raw_value)
-
-            # セクション（辞書）の場合は中身を展開
+        unset = data.pop("unset", {})
+        values = {}
+        for key, value in data.items():
             if isinstance(value, dict):
-                if verbose:
-                    print(f"[{section_or_key}] セクションを処理中...")
-                for key, sub_raw_value in value.items():
-                    sub_value = unwrap_toml_value(sub_raw_value)
-                    if hasattr(config, key):
-                        _load_config_field(config, key, sub_value)
-                        if verbose:
-                            print(f"  {key} = {sub_value}")
-                    else:
-                        if verbose:
-                            print(f"  警告: 未知のパラメータ '{key}' をスキップ")
-            # トップレベルのキーの場合（セクションではない）
-            elif hasattr(config, section_or_key):
-                _load_config_field(config, section_or_key, value)
-                if verbose:
-                    print(f"{section_or_key} = {value}")
+                values.update(value)
             else:
+                values[key] = value
+
+        for key, value in values.items():
+            if key in DEPRECATED_FIELDS:
+                logger.warning(f"廃止されたパラメータ '{key}' を無視します")
+            elif key in config.__dataclass_fields__:
+                _load_config_field(config, key, value)
                 if verbose:
-                    print(f"警告: 未知のセクションまたはパラメータ '{section_or_key}' をスキップ")
+                    print(f"  {key} = {value}")
+            elif verbose:
+                print(f"警告: 未知のパラメータ '{key}' をスキップ")
+
+        # 旧形式のTOMLで代替パラメーターだけが指定されている場合はそちらを使う。
+        if "ripple_voltage" in values and "ripple_ratio" not in values:
+            config.ripple_ratio = None
+        if "i_transient" in values and "switching_activity" not in values:
+            config.switching_activity = None
+
+        for name in unset.get("fields", []):
+            if name in _OPTIONAL_FIELDS:
+                setattr(config, name, None)
+        for index, names in unset.get("capacitors", {}).items():
+            cap = config.capacitors[int(index)]
+            for name in names:
+                cap.setdefault(name, None)
 
         if verbose:
             print(f"=== 設定ファイルを読み込みました: {config_path} ===")
-        
-    except Exception as e:
-        print(f"設定ファイルの読み込みエラー: {e}")
-        traceback.print_exc()
-    
+    except Exception as exc:
+        if strict:
+            raise
+        logger.error(f"設定ファイルの読み込みエラー: {exc}")
+
     return config
 
 
@@ -346,70 +369,21 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
         config_path = Path(config_path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # データクラスを辞書に変換
         config_dict = asdict(config)
+        capacitors = config_dict.pop("capacitors")
+        unset_fields = [key for key, value in config_dict.items() if value is None]
+        unset_caps = {}
+        for index, cap in enumerate(capacitors):
+            missing = [key for key, value in cap.items() if value is None]
+            if missing:
+                unset_caps[str(index)] = missing
+                for key in missing:
+                    del cap[key]
 
-        # 特殊な型の処理
-        for key, value in config_dict.items():
-            if isinstance(value, (np.integer, np.floating)):
-                config_dict[key] = float(value)
-            elif isinstance(value, np.ndarray):
-                config_dict[key] = value.tolist()
-
-        # capacitors の None/空文字列をフィルタリング
-        if "capacitors" in config_dict and config_dict["capacitors"] is not None:
-            filtered_capacitors = []
-            for cap in config_dict["capacitors"]:
-                if not isinstance(cap, dict):
-                    continue
-                filtered_cap = {}
-                for k, v in cap.items():
-                    # None をスキップ
-                    if v is None:
-                        continue
-                    # 空文字列をスキップ（name は除外）
-                    if k != "name" and isinstance(v, str) and v.strip() == "":
-                        continue
-                    filtered_cap[k] = v
-                # name が必須
-                if "name" in filtered_cap and filtered_cap["name"]:
-                    filtered_capacitors.append(filtered_cap)
-            config_dict["capacitors"] = filtered_capacitors
-
-        def _sanitize(value: Any) -> Any:
-            """TOML変換前にNoneを除去"""
-            if value is None:
-                return None
-            if isinstance(value, dict):
-                cleaned_dict = {}
-                for k, v in value.items():
-                    sanitized = _sanitize(v)
-                    if sanitized is not None:
-                        cleaned_dict[k] = sanitized
-                return cleaned_dict
-            if isinstance(value, list):
-                cleaned_list = []
-                for item in value:
-                    sanitized = _sanitize(item)
-                    if sanitized is not None:
-                        cleaned_list.append(sanitized)
-                return cleaned_list
-            if isinstance(value, tuple):
-                cleaned_tuple = tuple(
-                    sanitized for sanitized in (_sanitize(item) for item in value)
-                    if sanitized is not None
-                )
-                return cleaned_tuple if cleaned_tuple else None
-            return value
-
-        # Noneを除去したクリーンな辞書を生成
-        sanitized_config = _sanitize(config_dict)
-        if not isinstance(sanitized_config, dict):
-            sanitized_config = {}
-        config_dict = {key: value for key, value in sanitized_config.items() if value is not None}
-
-        # TOMLドキュメント作成
         doc = tomlkit.document()
+        doc["capacitors"] = capacitors
+        if unset_fields or unset_caps:
+            doc["unset"] = {"fields": unset_fields, "capacitors": unset_caps}
 
         # セクション分けして保存
         sections = {
@@ -428,23 +402,8 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
             ],
             "pdn_parasitic": ["R_vrm", "L_vrm", "R_sN", "L_sN", "L_mntN", "R_s", "L_s", "R_v", "L_v", "R_p", "C_p", "tan_delta_p"],
             "spice": ["dc_bias", "model_path"],
-            "search": ["max_total_parts", "min_total_parts_ratio", "top_k", "shuffle_evaluation", "buffer_limit"],
-            "weights": [
-                "weight_max",
-                "weight_area",
-                "weight_mean",
-                "weight_anti",
-                "weight_flat",
-                "weight_under",
-                "weight_parts",
-                "weight_num_types",
-                "weight_resonance",
-                "weight_improvement",
-                "weight_low_improvement",
-                "low_improvement_threshold",
-                "weight_mc_worst",
-                "ignore_safe_anti_resonance"
-            ],
+            "search": ["max_total_parts", "min_total_parts_ratio", "top_k", "shuffle_evaluation"],
+            "weights": [*WEIGHT_FIELDS, "ignore_safe_anti_resonance"],
             "monte_carlo": ["mc_enable", "mc_samples", "tol_C", "tol_ESR", "tol_ESL", "mlcc_derating"],
             "system": ["seed", "max_vram_ratio_limit", "cuda", "dtype_c", "dtype_r", "force_numpy"],
             "gui": ["use_gui", "server_port", "dark_theme", "language"],
@@ -457,15 +416,10 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
             for key in keys:
                 if key in config_dict:
                     value = config_dict[key]
-                    if value is None:
-                        continue
-                    section[key] = value
+                    if value is not None:
+                        section[key] = value.item() if isinstance(value, np.generic) else value
             if section:
                 doc[section_name] = section
-
-        # コンデンサリストを追加
-        if "capacitors" in config_dict and config_dict["capacitors"]:
-            doc["capacitors"] = config_dict["capacitors"]
 
         # ファイルに書き込み
         with open(config_path, "w", encoding="utf-8") as f:
@@ -512,7 +466,7 @@ def validate_config(config: UserConfig) -> bool:
 
             # ripple_ratio と ripple_voltage は排他的
             if config.ripple_ratio is not None and config.ripple_voltage is not None:
-                print("警告: ripple_ratio と ripple_voltage が両方設定されています。ripple_ratio を優先します")
+                print("警告: ripple_ratio と ripple_voltage が両方設定されています。ripple_voltage を優先します")
 
             if config.ripple_ratio is not None:
                 assert 0 < config.ripple_ratio <= 100, "許容リップル率は0-100%の範囲である必要があります"
@@ -566,11 +520,15 @@ def validate_config(config: UserConfig) -> bool:
             if min_val is not None and max_val is not None:
                 assert float(max_val) >= float(min_val), f"コンデンサ[{i}]の最大使用数は最小使用数以上である必要があります"
 
+        # 評価重みの検証
+        minimum, maximum, _ = WEIGHT_RANGE
+        for name in WEIGHT_FIELDS:
+            assert minimum <= getattr(config, name) <= maximum, f"{name} は{minimum}–{maximum}の範囲である必要があります"
+
         # 探索設定の検証
         assert config.max_total_parts > 0, "最大総数は正の値である必要があります"
         assert config.min_total_parts_ratio <= 1, "最小総数比率は0-1の範囲である必要があります"
         assert config.top_k > 0, "上位候補数は正の値である必要があります"
-        assert config.buffer_limit > 0, "バッファサイズは正の値である必要があります"
         
         # Monte Carlo設定の検証
         if config.mc_enable:
@@ -671,6 +629,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "update_caplist":"コンデンサリストを更新",
             "apply_change":"変更を適用",
             "target_mask": "目標インピーダンス",
+            "auto_target_help": "両方を入力した場合は、リップル電圧と過渡電流がそれぞれ優先されます。",
             "update_mask":"目標インピーダンスを更新",
             "frequency_grid": "周波数グリッド",
             "evaluation_band": "評価帯域",
@@ -678,9 +637,27 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "monte_carlo": "Monte Carlo設定",
             "gpu_settings": "GPU設定",
             "weights": "評価重み",
-            "weight_num_types": "種類数の重み",
-            "weight_resonance": "共振ペナルティの重み",
-            "ignore_safe_anti": "目標以下の反共振を無視",
+            "ignore_safe_anti": "目標以下の反共振/谷を無視",
+            "label_ignore_safe_anti_resonance": "目標以下の反共振/谷を無視",
+            "help_ignore_safe_anti_resonance": "目標インピーダンス以下の反共振ピークと共振の谷をスコアから除外します。",
+            "label_weight_max": "ピーク",
+            "help_weight_max": "評価帯域内で最も目標に近い/超えた点の目標比（6dB以上下回ると0、目標ちょうどで1）",
+            "label_weight_area": "超過量",
+            "help_weight_area": "目標を超えた量の帯域平均（2倍超過が全帯域で続くと1）",
+            "label_weight_mean": "平均",
+            "help_weight_mean": "目標比の帯域平均（6dB以上下回る部分は0に飽和し、過剰な低インピーダンス化を評価しない）",
+            "label_weight_anti": "反共振",
+            "help_weight_anti": "反共振ピークの周辺からの突出量の合計（6dB突出で1）",
+            "label_weight_resonance": "共振の谷",
+            "help_weight_resonance": "直列共振による急峻な谷の深さの合計（6dBの谷で1）",
+            "label_weight_flat": "平坦さ",
+            "help_weight_flat": "目標比の帯域内ばらつき（加重標準偏差、6dBで1）",
+            "label_weight_parts": "部品点数",
+            "help_weight_parts": "部品総数 / 10（最大部品数に依らず1個あたり一定のコスト）",
+            "label_weight_num_types": "種類数",
+            "help_weight_num_types": "使用する部品の種類数 / 5（候補数に依らず1種類あたり一定のコスト）",
+            "label_weight_mc_worst": "MC最悪",
+            "help_weight_mc_worst": "部品公差のMonte Carlo最悪サンプルにおけるインピーダンス成分の悪化量",
             "reset_weights": "重みをリセット",
             "calculate_zc_only": "|Z_c|計算",
             "use_custom_mask": "カスタムマスクを使用",
@@ -719,6 +696,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "update_caplist":"Updated the capacitor list",
             "apply_change":"Apply Changes",
             "target_mask": "Target Impedance",
+            "auto_target_help": "Ripple voltage and transient current take precedence when both inputs in a pair are set.",
             "update_mask":"Updated the custom mask",
             "frequency_grid": "Frequency Grid",
             "evaluation_band": "Evaluation Band",
@@ -726,9 +704,27 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "monte_carlo": "Monte Carlo Settings",
             "gpu_settings": "GPU Settings",
             "weights": "Evaluation Weights",
-            "weight_num_types": "Num types weight",
-            "weight_resonance": "Resonance penalty weight",
-            "ignore_safe_anti": "Ignore anti-resonances under target",
+            "ignore_safe_anti": "Ignore peaks/dips under target",
+            "label_ignore_safe_anti_resonance": "Ignore peaks/dips under target",
+            "help_ignore_safe_anti_resonance": "Exclude anti-resonance peaks and resonance dips below the target from scoring.",
+            "label_weight_max": "Peak",
+            "help_weight_max": "Peak |Z|/target in the band (0 when 6 dB or more below target, 1 at target)",
+            "label_weight_area": "Excess",
+            "help_weight_area": "Band average of the excess over target (1 = 2x over target across the band)",
+            "label_weight_mean": "Mean",
+            "help_weight_mean": "Band average of |Z|/target (saturates at 0 below -6 dB, so over-design is not rewarded)",
+            "label_weight_anti": "Anti-resonance",
+            "help_weight_anti": "Sum of anti-resonance peak prominences (1 = 6 dB)",
+            "label_weight_resonance": "Resonance dip",
+            "help_weight_resonance": "Sum of sharp series-resonance dip depths (1 = 6 dB)",
+            "label_weight_flat": "Flatness",
+            "help_weight_flat": "Weighted std of |Z|/target in the band (1 = 6 dB)",
+            "label_weight_parts": "Parts",
+            "help_weight_parts": "Total parts / 10 (constant cost per part regardless of the max total)",
+            "label_weight_num_types": "Types",
+            "help_weight_num_types": "Number of part types / 5 (constant cost per type regardless of the candidate list)",
+            "label_weight_mc_worst": "MC worst",
+            "help_weight_mc_worst": "Degradation of the impedance score in the worst Monte Carlo tolerance sample",
             "reset_weights": "Reset Weights",
             "calculate_zc_only": "Calculate |Z_c| Only",
             "use_custom_mask": "Use Custom Mask",

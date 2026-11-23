@@ -1,434 +1,365 @@
-import traceback
-from typing import Dict, List, Optional, Any, Tuple
+"""
+PDNインピーダンス計算（ラダー合成、Monte Carlo）
+
+回路（images/PDN.jpg）を測定ノード（Load側）から見た順:
+
+    Load ─ Z_v ─ Z_s ─┬─ Z_s1 ─┬─ Z_s2 ─┬─ … ─ Z_sN ─┬─ VRM
+                      Y_p      Y_cm1    Y_cm2          Y_cmN // Y_vrm
+
+- Z_v = R_v + jωL_v（BGAビア）、Z_s = R_s + jωL_s（Load直前のspreading）
+- Y_p = ωC_p(tanδ + j) / (1 + R_p·ωC_p(tanδ + j))（損失を持つプレーナ容量）
+- Z_sk = R_sN + jωL_sN（コンデンサ1個ごとのspreading、直列）
+- Y_cmk = 1 / (Z_ck + jωL_mnt,k)（コンデンサ1個 + マウントインダクタンス、並列）
+- Y_vrm = 1/(R_vrm + jωL_vrm) + Y_p（理想電源は短絡、寄生分のみアドミタンスとして残す）
+
+コンデンサは1個ごとに1段（Z_sk, Y_cmk）を占め、Load側から容量の小さい順に並ぶ。
+同じ種類をn個使う組み合わせは同一の段がn段連続する。
+測定ノードに1Aを注入したときのポート電圧が Z_pdn となる。
+"""
+
+from typing import Any, Callable, Dict, Optional
+
 import numpy as np
 
 from deca_auto.config import UserConfig
-from deca_auto.utils import logger, validate_result, safe_divide, xp_array
+from deca_auto.utils import transfer_to_device, transfer_to_host
 
 
-def _build_config_lookup(config: UserConfig) -> Dict[str, Dict[str, Any]]:
-    """コンデンサ名→設定辞書のルックアップを作成"""
-    return {cap['name']: cap for cap in config.capacitors}
+def _as_complex_dtype(dtype: Any) -> np.dtype:
+    target = np.dtype(dtype)
+    if target.kind != 'c':
+        raise ValueError(f"複素数dtypeが必要です: {target}")
+    return target
 
 
-def _prepare_capacitor_arrays(
-    capacitor_impedances: Dict[str, np.ndarray],
+def calculate_pdn_parasitic_elements(
+    f_grid: Any,
     config: UserConfig,
-    parasitic_elements: Dict[str, np.ndarray],
-    xp: Any,
-    omega: Optional[np.ndarray] = None,
-    dtype: Optional[Any] = None,
-) -> Tuple[Tuple[str, ...], Any, Any, Any]:
-    """ラダー計算用にコンデンサ関連配列を整形"""
-
-    cap_names: Tuple[str, ...] = tuple(capacitor_impedances.keys())
-    if not cap_names:
-        raise ValueError("コンデンサインピーダンス辞書が空です")
-
-    z_cap_array = xp.stack([capacitor_impedances[name] for name in cap_names])
-    target_dtype = None
-    if dtype is not None:
-        target_dtype = np.dtype(dtype)
-        z_cap_array = z_cap_array.astype(target_dtype, copy=False)
-    else:
-        target_dtype = z_cap_array.dtype
-
-    if omega is None:
-        omega = parasitic_elements.get('omega')
-    if omega is None:
-        raise ValueError("omega が取得できませんでした")
-
-    omega_backend = xp.asarray(omega)
-    config_map = _build_config_lookup(config)
-    default_l_mnt = float(getattr(config, 'L_mntN', 0.0))
-    l_mnt_values = []
-    for name in cap_names:
-        cap_cfg = config_map.get(name)
-        if cap_cfg and cap_cfg.get('L_mnt') is not None:
-            l_mnt_values.append(float(cap_cfg['L_mnt']))
-        else:
-            l_mnt_values.append(default_l_mnt)
-
-    l_mnt_array = xp.asarray(l_mnt_values, dtype=omega_backend.dtype)
-    z_mnt_array = (1j * omega_backend)[xp.newaxis, :] * l_mnt_array[:, xp.newaxis]
-    if target_dtype is not None:
-        z_mnt_array = z_mnt_array.astype(target_dtype, copy=False)
-
-    return cap_names, z_cap_array, z_mnt_array, omega_backend
-
-
-def calculate_pdn_parasitic_elements(f_grid: np.ndarray, config: UserConfig,
-                                    xp: Any = np,
-                                    dtype: Optional[Any] = None) -> Dict[str, np.ndarray]:
+    xp: Any = np,
+    dtype: Any = np.complex64,
+) -> Dict[str, Any]:
     """
-    PDN寄生成分のインピーダンス/アドミタンスを計算
-    
-    Args:
-        f_grid: 周波数グリッド
-        config: ユーザー設定
-        xp: バックエンドモジュール
-    
+    PDN寄生成分（周波数のみに依存する要素）を計算する
+
     Returns:
-        寄生成分の辞書（'omega'も含む）
+        'z_v', 'z_s', 'z_sN', 'y_p', 'y_vrm'（複素 (F,)）と 'omega'（実数 (F,)）
     """
-    omega = 2 * xp.pi * f_grid
-    
-    # Via (BGAビア)
-    # Z_v = R_v + jωL_v
-    z_v = config.R_v + 1j * omega * config.L_v
-    
-    # Spreading (拡散抵抗・インダクタンス)
-    # Z_s = R_s + jωL_s
-    z_s = config.R_s + 1j * omega * config.L_s
-    
-    # Spreading per decap (デカップリングコンデンサ用)
-    # Z_sN = R_sN + jωL_sN
-    z_sN = config.R_sN + 1j * omega * config.L_sN
-    
-    # Planar (プレーナ容量と損失)
-    # 損失正接を考慮: Y_p = ωC_p(tanδ + j) / (1 + R_p*ωC_p(tanδ + j))
-    tan_delta = config.tan_delta_p
-    planar_admittance = omega * config.C_p * (tan_delta + 1j)
-    denominator = 1 + config.R_p * planar_admittance
-    y_p = safe_divide(planar_admittance, denominator, fill_value=1e-12, xp=xp)
+    target = _as_complex_dtype(dtype)
+    # 寄生成分は float64 で計算してから目標精度へ落とす（小さいR/Lでの丸め誤差を避ける）
+    omega = 2.0 * np.pi * xp.asarray(f_grid, dtype=np.float64)
+    jw = 1j * omega
 
-    # VRM (Voltage Regulator Module)
-    # Y_vrm = 1/(R_vrm + jωL_vrm) + Y_p
-    z_vrm = config.R_vrm + 1j * omega * config.L_vrm
-    y_vrm_core = safe_divide(1.0, z_vrm, fill_value=0.0, xp=xp)
-    y_vrm = y_vrm_core + y_p
-    
-    # Mounting inductance (マウントインダクタンス)
-    # デフォルト値
-    z_mntN = 1j * omega * config.L_mntN
-    
-    if dtype is not None:
-        target = np.dtype(dtype)
-        y_vrm = y_vrm.astype(target, copy=False)
-        z_v = z_v.astype(target, copy=False)
-        z_s = z_s.astype(target, copy=False)
-        z_sN = z_sN.astype(target, copy=False)
-        y_p = y_p.astype(target, copy=False)
-        z_mntN = z_mntN.astype(target, copy=False)
+    z_v = config.R_v + jw * config.L_v
+    z_s = config.R_s + jw * config.L_s
+    z_sN = config.R_sN + jw * config.L_sN
+
+    planar = omega * config.C_p * (config.tan_delta_p + 1j)
+    y_p = planar / (1.0 + config.R_p * planar)
+
+    z_vrm = config.R_vrm + jw * config.L_vrm
+    # R_vrm = L_vrm = 0（理想電源直結）の場合でも有限値に留める
+    z_vrm = xp.where(xp.abs(z_vrm) > 0, z_vrm, 1e-30)
+    y_vrm = 1.0 / z_vrm + y_p
 
     return {
-        'y_vrm': y_vrm,
-        'z_v': z_v,
-        'z_s': z_s,
-        'z_sN': z_sN,
-        'y_p': y_p,
-        'z_mntN': z_mntN,
-        'omega': omega  # omegaも保存
+        'z_v': z_v.astype(target),
+        'z_s': z_s.astype(target),
+        'z_sN': z_sN.astype(target),
+        'y_p': y_p.astype(target),
+        'y_vrm': y_vrm.astype(target),
+        'omega': omega.astype(np.finfo(target).dtype),
     }
 
 
 def prepare_pdn_components(
-    capacitor_impedances: Dict[str, np.ndarray],
+    capacitor_impedances: Dict[str, Any],
     config: UserConfig,
-    f_grid: np.ndarray,
+    f_grid: Any,
     xp: Any = np,
-    dtype: Optional[Any] = None,
+    dtype: Any = None,
+    rlc_params: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Dict[str, Any]:
     """
-    PDN計算で再利用できる要素を事前計算
+    PDN計算で全チャンク共通に再利用する配列を事前計算する
 
     Args:
-        capacitor_impedances: コンデンサインピーダンス辞書
-        config: ユーザー設定
-        f_grid: 周波数グリッド
-        xp: バックエンドモジュール
-        dtype: ターゲットデータ型
+        capacitor_impedances: {name: Z_c}（容量の小さい順。Z_cはマウント寄生を含まない部品単体）
+        config: ユーザー設定（コンデンサ別 L_mnt、既定 L_mntN、寄生成分）
+        f_grid: 周波数グリッド（xp配列）
+        xp: バックエンド
+        dtype: 複素dtype（既定は config.dtype_c）
+        rlc_params: {name: {'C': 容量, 'ESL': 等価ESL}}（Monte Carloの公差適用に使用）
 
     Returns:
-        辞書形式の事前計算データ
+        'cap_names', 'z_c'(T,F), 'z_mnt'(T,F), 'y_cm'(T,F), 'parasitic', 'omega',
+        'dtype', 'C_nom'(T,), 'ESL_nom'(T,)
     """
-    target_dtype = np.dtype(dtype) if dtype is not None else np.dtype(getattr(config, 'dtype_c', 'complex64'))
-    parasitic_elements = calculate_pdn_parasitic_elements(f_grid, config, xp, target_dtype)
-    cap_names, z_cap_array, z_mnt_array, omega = _prepare_capacitor_arrays(
-        capacitor_impedances,
-        config,
-        parasitic_elements,
-        xp,
-        parasitic_elements.get('omega'),
-        target_dtype,
-    )
+    target = _as_complex_dtype(dtype if dtype is not None else config.dtype_c)
+    cap_names = tuple(capacitor_impedances.keys())
+    if not cap_names:
+        raise ValueError("コンデンサインピーダンス辞書が空です")
+
+    parasitic = calculate_pdn_parasitic_elements(f_grid, config, xp, target)
+    omega = parasitic['omega']
+
+    z_c = xp.stack([xp.asarray(capacitor_impedances[name]) for name in cap_names]).astype(target)
+
+    cap_cfg = {cap.get('name'): cap for cap in config.capacitors}
+    default_l_mnt = float(config.L_mntN)
+    l_mnt = []
+    for name in cap_names:
+        value = cap_cfg.get(name, {}).get('L_mnt')
+        l_mnt.append(default_l_mnt if value is None else float(value))
+    l_mnt_arr = xp.asarray(l_mnt, dtype=omega.dtype)
+    z_mnt = (1j * omega[None, :] * l_mnt_arr[:, None]).astype(target)
+
+    y_cm = (1.0 / (z_c + z_mnt)).astype(target)
+
+    rlc_params = rlc_params or {}
+    c_nom = [float(rlc_params.get(name, {}).get('C', 0.0) or 0.0) for name in cap_names]
+    esl_nom = [float(rlc_params.get(name, {}).get('ESL', 0.0) or 0.0) for name in cap_names]
 
     return {
         'cap_names': cap_names,
-        'z_cap_array': z_cap_array,
-        'z_mnt_array': z_mnt_array,
-        'parasitic_elements': parasitic_elements,
+        'z_c': z_c,
+        'z_mnt': z_mnt,
+        'y_cm': y_cm,
+        'parasitic': parasitic,
         'omega': omega,
-        'dtype': target_dtype,
+        'dtype': target,
+        'C_nom': xp.asarray(c_nom, dtype=omega.dtype),
+        'ESL_nom': xp.asarray(esl_nom, dtype=omega.dtype),
     }
 
 
-def _get_pdn_core_assets(
-    capacitor_impedances: Dict[str, np.ndarray],
-    config: UserConfig,
-    f_grid: np.ndarray,
-    xp: Any,
-    dtype: Optional[Any] = None,
-    prepared: Optional[Dict[str, Any]] = None,
-) -> Tuple[Dict[str, Any], Any, Any, Dict[str, Any]]:
-    """
-    PDN計算に必要な基本要素を取得（preparedキャッシュを再利用）
-    """
-    if prepared is None:
-        prepared = prepare_pdn_components(
-            capacitor_impedances,
-            config,
-            f_grid,
-            xp,
-            dtype,
-        )
-    parasitic_elements = prepared['parasitic_elements']
-    z_cap_array = prepared['z_cap_array']
-    z_mnt_array = prepared['z_mnt_array']
-    return parasitic_elements, z_cap_array, z_mnt_array, prepared
-
-
-def _pdn_impedance_core(
+def _ladder_impedance(
     count_vectors: Any,
-    z_cap_array: Any,
-    z_mnt_array: Any,
-    parasitic_elements: Dict[str, Any],
+    stage_admittance: Callable[[int, Any], Any],
+    parasitic: Dict[str, Any],
     xp: Any,
 ) -> Any:
     """
-    ラダー回路のPDNインピーダンスをバッチ計算
+    ラダー回路をVRM側から測定ノード側へ畳み込んで Z_pdn を求める
 
     Args:
-        count_vectors: カウントベクトル (N_batch, N_caps)
-        z_cap_array: コンデンサインピーダンス配列
-        z_mnt_array: マウントインピーダンス配列
-        parasitic_elements: 寄生成分辞書
-        xp: バックエンドモジュール
+        count_vectors: (B, T) 各種類の使用数（列は容量の小さい順）
+        stage_admittance: (k, types_k) -> (B, F) のY_cm。k はVRM側から数えた段番号、
+            types_k は各行の k 段目の種類インデックス（未使用段は -1 ではなく 0 にクリップ済み）
+        parasitic: calculate_pdn_parasitic_elements の結果
+        xp: バックエンド
 
     Returns:
-        バッチPDNインピーダンス (N_batch, N_freq)
-
-    Notes:
-        - 不要な配列変換を削減
-        - ブロードキャストを効率的に使用
-        - インプレース演算でメモリを節約
+        Z_pdn (B, F)
     """
-    # 配列の正規化（必要な場合のみ変換）
-    count_vectors = xp_array(xp, count_vectors, dtype=np.int32)
-    if count_vectors.ndim == 1:
-        count_vectors = count_vectors[xp.newaxis, :]
+    counts = xp.asarray(count_vectors).astype(np.int32, copy=False)
+    if counts.ndim == 1:
+        counts = counts[None, :]
+    n_batch = counts.shape[0]
 
-    n_batch = count_vectors.shape[0]
+    # suffix[:, t] = 種類t以降（容量の大きい側）の総数。VRM側から k 段目の種類は suffix[:, t] > k を満たす最大の t
+    suffix = xp.cumsum(counts[:, ::-1], axis=1)[:, ::-1]
+    n_stages = suffix[:, 0]
+    max_stages = int(n_stages.max()) if n_batch > 0 else 0
 
-    # z_cap_arrayとz_mnt_arrayの正規化（すでに適切な形状の場合はスキップ）
-    z_cap_array = xp_array(xp, z_cap_array)
-    z_mnt_array = xp_array(xp, z_mnt_array)
+    y_vrm = parasitic['y_vrm']
+    z_sN = parasitic['z_sN']
+    y = xp.empty((n_batch, y_vrm.shape[0]), dtype=y_vrm.dtype)
+    y[...] = y_vrm
 
-    # ブロードキャスト（メモリコピーなし）
-    if z_cap_array.ndim == 2:
-        z_cap_broadcast = xp.broadcast_to(z_cap_array, (n_batch,) + z_cap_array.shape)
-    else:
-        z_cap_broadcast = z_cap_array
+    for k in range(max_stages):
+        types_k = (suffix > k).sum(axis=1) - 1
+        active = (n_stages > k)[:, None]
+        types_k = xp.maximum(types_k, 0)
+        # 段k: ノードに Y_cm を並列接続し、Load側へ Z_sN を直列に挟む
+        y_stage = 1.0 / (z_sN + 1.0 / (y + stage_admittance(k, types_k)))
+        y = xp.where(active, y_stage, y)
 
-    if z_mnt_array.ndim == 2:
-        z_mnt_broadcast = xp.broadcast_to(z_mnt_array, (n_batch,) + z_mnt_array.shape)
-    else:
-        z_mnt_broadcast = z_mnt_array
-
-    # マウントインピーダンスを加算
-    z_with_mount = z_cap_broadcast + z_mnt_broadcast
-    n_caps = z_with_mount.shape[1]
-
-    # VRMアドミタンスの初期化（効率的なブロードキャスト）
-    y_vrm = parasitic_elements['y_vrm']
-    y_total = xp.empty((n_batch, len(y_vrm)), dtype=y_vrm.dtype)
-    y_total[:] = y_vrm
-
-    # ラダー回路の計算（逆順）
-    for cap_idx in range(n_caps - 1, -1, -1):
-        # 使用されているコンデンサのインデックスを取得
-        idx = xp.where(count_vectors[:, cap_idx] > 0)[0]
-        if idx.size == 0:
-            continue
-
-        # カウント数とインピーダンス
-        counts = count_vectors[idx, cap_idx]
-        if counts.dtype != z_with_mount.dtype:
-            counts = counts.astype(z_with_mount.dtype, copy=False)
-
-        # コンデンサのアドミタンス
-        inv_z_cm = safe_divide(1.0, z_with_mount[idx, cap_idx, :], fill_value=0.0, xp=xp)
-        y_cm = counts[:, xp.newaxis] * inv_z_cm
-
-        # 直列インピーダンス
-        z_series = parasitic_elements['z_sN'] + safe_divide(1.0, y_cm, fill_value=0.0, xp=xp)
-
-        # トータルアドミタンスに追加（インプレース）
-        y_total[idx] += safe_divide(1.0, z_series, fill_value=0.0, xp=xp)
-
-    # プレーナ容量を追加
-    y_with_planar = y_total + parasitic_elements['y_p']
-
-    # Spreadingインピーダンス
-    z_after_spreading = parasitic_elements['z_s'] + safe_divide(1.0, y_with_planar, fill_value=0.0, xp=xp)
-
-    # Viaインピーダンス
-    z_pdn = parasitic_elements['z_v'] + z_after_spreading
-
-    return z_pdn
+    z = parasitic['z_s'] + 1.0 / (y + parasitic['y_p'])
+    return parasitic['z_v'] + z
 
 
-def assemble_pdn_ladder(count_vector: np.ndarray,
-                       capacitor_impedances: Dict[str, np.ndarray],
-                       capacitor_indices: np.ndarray,
-                       parasitic_elements: Dict[str, np.ndarray],
-                       config: UserConfig,
-                       xp: Any = np) -> np.ndarray:
-    """PDNラダー回路を組み立ててZ_pdnを計算（単一の組み合わせ）"""
-
-    try:
-        omega = parasitic_elements.get('omega')
-        sample_dtype = next(iter(capacitor_impedances.values())).dtype
-        cap_names, z_cap_array, z_mnt_array, _ = _prepare_capacitor_arrays(
-            capacitor_impedances,
-            config,
-            parasitic_elements,
-            xp,
-            omega,
-            sample_dtype,
-        )
-        _ = cap_names  # 順序保持（測定ノード側が小容量）の確認用
-        z_pdn_batch = _pdn_impedance_core(
-            count_vector,
-            z_cap_array,
-            z_mnt_array,
-            parasitic_elements,
-            xp,
-        )
-        return z_pdn_batch[0]
-    except Exception as exc:
-        logger.error(f"PDNラダー計算エラー: {exc}")
-        traceback.print_exc()
-        raise
+_LADDER_KERNEL_SOURCE = r"""
+#include <cupy/complex.cuh>
+extern "C" __global__ void pdn_ladder_{name}(
+    const int* counts, const long long n_rows, const int n_types, const int n_freq,
+    const complex<{real}>* y_cm, const complex<{real}>* z_sN, const complex<{real}>* y_vrm,
+    const complex<{real}>* y_p, const complex<{real}>* z_s, const complex<{real}>* z_v,
+    complex<{real}>* out)
+{{
+    const long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_rows * n_freq) return;
+    const long long b = idx / n_freq;
+    const int f = (int)(idx - b * n_freq);
+    const int* row = counts + b * n_types;
+    const complex<{real}> one(1, 0);
+    const complex<{real}> zsn = z_sN[f];
+    complex<{real}> y = y_vrm[f];
+    // VRM側（容量の大きい種類）から1個ずつ段を畳み込む
+    for (int t = n_types - 1; t >= 0; --t) {{
+        const int n = row[t];
+        if (n <= 0) continue;
+        const complex<{real}> ycm = y_cm[(long long)t * n_freq + f];
+        for (int j = 0; j < n; ++j) {{
+            y = one / (zsn + one / (y + ycm));
+        }}
+    }}
+    out[idx] = z_v[f] + z_s[f] + one / (y + y_p[f]);
+}}
+"""
+_LADDER_KERNELS: Dict[str, Any] = {}
 
 
-def calculate_pdn_impedance_batch(count_vectors: np.ndarray,
-                                 capacitor_impedances: Dict[str, np.ndarray],
-                                 capacitor_indices: np.ndarray,
-                                 f_grid: np.ndarray,
-                                 config: UserConfig,
-                                 xp: Any = np,
-                                 prepared: Optional[Dict[str, Any]] = None) -> np.ndarray:
+def _ladder_kernel(dtype: np.dtype) -> Any:
+    """CuPy用の融合ラダーカーネル（dtypeごとにコンパイルしてキャッシュ）"""
+    import cupy as cp
+
+    name = 'c64' if np.dtype(dtype) == np.complex64 else 'c128'
+    if name not in _LADDER_KERNELS:
+        real = 'float' if name == 'c64' else 'double'
+        source = _LADDER_KERNEL_SOURCE.format(name=name, real=real)
+        _LADDER_KERNELS[name] = cp.RawKernel(source, f'pdn_ladder_{name}')
+    return _LADDER_KERNELS[name]
+
+
+def calculate_pdn_impedance_batch(
+    count_vectors: Any,
+    prepared: Dict[str, Any],
+    xp: Any = np,
+) -> Any:
     """
-    PDNインピーダンスをバッチ計算（GPU最適化）
-    
+    組み合わせバッチの Z_pdn を計算する
+
+    CuPyでは1スレッドが（組み合わせ, 周波数）1点のラダー全体を計算する融合カーネルを使い、
+    中間配列の生成とメモリ往復を省く。NumPyでは段ごとのベクトル演算（_ladder_impedance）。
+
     Args:
-        count_vectors: カウントベクトル配列 (N_batch, N_capacitors)
-        capacitor_impedances: コンデンサインピーダンス辞書
-        capacitor_indices: コンデンサインデックス
-        f_grid: 周波数グリッド
-        config: ユーザー設定
-        xp: バックエンドモジュール
-    
+        count_vectors: (B, T) カウントベクトル（xp配列）
+        prepared: prepare_pdn_components の結果
+        xp: バックエンド
+
     Returns:
-        Z_pdn配列 (N_batch, N_freq)
+        Z_pdn (B, F)
     """
-    dtype = prepared.get('dtype') if prepared else getattr(config, 'dtype_c', 'complex64')
-    target_dtype = np.dtype(dtype)
-    parasitic_elements, z_cap_array, z_mnt_array, prepared = _get_pdn_core_assets(
-        capacitor_impedances,
-        config,
-        f_grid,
-        xp,
-        target_dtype,
-        prepared,
-    )
-
-    z_pdn_batch = _pdn_impedance_core(
-        count_vectors,
-        z_cap_array,
-        z_mnt_array,
-        parasitic_elements,
-        xp,
-    ).astype(z_cap_array.dtype, copy=False)
-
-    if not validate_result(z_pdn_batch, "PDNインピーダンス"):
-        logger.error("PDNインピーダンス計算で異常値を検出")
-
-    return z_pdn_batch
-
-
-def calculate_pdn_impedance_monte_carlo(count_vector: np.ndarray,
-                                       capacitor_impedances: Dict[str, np.ndarray],
-                                       capacitor_indices: np.ndarray,
-                                       f_grid: np.ndarray,
-                                       config: UserConfig,
-                                       n_samples: int,
-                                       xp: Any = np,
-                                       prepared: Optional[Dict[str, Any]] = None) -> np.ndarray:
-    """
-    Monte Carlo法でPDNインピーダンスを計算（ロバスト性評価）
-    
-    Args:
-        count_vector: カウントベクトル（単一）
-        capacitor_impedances: コンデンサインピーダンス辞書
-        capacitor_indices: コンデンサインデックス
-        f_grid: 周波数グリッド
-        config: ユーザー設定
-        n_samples: MCサンプル数
-        xp: バックエンドモジュール
-    
-    Returns:
-        Z_pdn_mc配列 (n_samples, n_freq)
-    """
-    n_caps = len(capacitor_impedances)
-
-    if n_samples <= 0:
-        return xp.zeros((0, len(f_grid)), dtype=xp.asarray(f_grid).dtype)
-
+    y_cm = prepared['y_cm']
     if xp is np:
-        rng = np.random.default_rng(config.seed)
-        normal = rng.normal
-    else:
-        rng = xp.random.RandomState(config.seed)
-        normal = lambda loc, scale, size: rng.normal(loc, scale, size=size, dtype=xp.float32)
+        return _ladder_impedance(
+            count_vectors,
+            lambda _k, types_k: y_cm[types_k],
+            prepared['parasitic'],
+            xp,
+        )
 
-    dtype = prepared.get('dtype') if prepared else getattr(config, 'dtype_c', 'complex64')
-    target_dtype = np.dtype(dtype)
-    parasitic_elements, z_cap_base, z_mnt_array, prepared = _get_pdn_core_assets(
-        capacitor_impedances,
-        config,
-        f_grid,
-        xp,
-        target_dtype,
-        prepared,
+    parasitic = prepared['parasitic']
+    dtype = prepared['dtype']
+    counts = xp.ascontiguousarray(xp.asarray(count_vectors, dtype=np.int32))
+    if counts.ndim == 1:
+        counts = counts[None, :]
+    n_rows, n_types = counts.shape
+    n_freq = int(y_cm.shape[1])
+    out = xp.empty((n_rows, n_freq), dtype=dtype)
+    total = n_rows * n_freq
+    if total == 0:
+        return out
+    threads = 256
+    args = [xp.ascontiguousarray(parasitic[key], dtype=dtype)
+            for key in ('z_sN', 'y_vrm', 'y_p', 'z_s', 'z_v')]
+    _ladder_kernel(dtype)(
+        ((total + threads - 1) // threads,), (threads,),
+        (counts, np.int64(n_rows), np.int32(n_types), np.int32(n_freq),
+         xp.ascontiguousarray(y_cm, dtype=dtype), *args, out),
     )
+    return out
 
-    esr_orig = xp.mean(xp.real(z_cap_base), axis=1)
-    z_imag_base = xp.imag(z_cap_base)
 
-    shape = (n_samples, n_caps)
-    float_dtype = z_cap_base.real.dtype
-    c_variation = xp.clip(normal(1.0, config.tol_C / 3, shape), 1 - config.tol_C, 1 + config.tol_C).astype(float_dtype, copy=False)
-    esr_variation = xp.clip(normal(1.0, config.tol_ESR / 3, shape), 1 - config.tol_ESR, 1 + config.tol_ESR).astype(float_dtype, copy=False)
-    esl_variation = xp.clip(normal(1.0, config.tol_ESL / 3, shape), 1 - config.tol_ESL, 1 + config.tol_ESL).astype(float_dtype, copy=False)
+def _tolerance_factors(counts_host: np.ndarray, n_samples: int, config: UserConfig,
+                       seed: int) -> np.ndarray:
+    """
+    公差倍率 (3, max_stages, K*n_samples) = (k_C, k_R, k_L) をホストで生成する
 
-    c_variation = c_variation * (1 - config.mlcc_derating)
+    乱数は組み合わせごとに (seed, カウントベクトル) から初期化するため、バックエンド
+    （NumPy/CuPy）、チャンク分割、評価順のシャッフルに依らず同じ組み合わせは同じ結果になる。
+    各倍率は平均1、3σ=公差の正規分布を ±公差 でクリップしたもの。k_C にはディレーティングを含む。
+    """
+    tolerances = (float(config.tol_C), float(config.tol_ESR), float(config.tol_ESL))
+    n_combo = counts_host.shape[0]
+    n_stages = counts_host.sum(axis=1)
+    max_stages = int(n_stages.max()) if n_combo else 0
+    factors = np.ones((3, max_stages, n_combo * n_samples), dtype=np.float64)
+    for i, row in enumerate(counts_host):
+        rng = np.random.default_rng([int(seed), *(int(v) for v in row)])
+        cols = slice(i * n_samples, (i + 1) * n_samples)
+        for j, tol in enumerate(tolerances):
+            if tol > 0:
+                values = rng.normal(1.0, tol / 3.0, size=(int(n_stages[i]), n_samples))
+                factors[j, :n_stages[i], cols] = np.clip(values, 1.0 - tol, 1.0 + tol)
+    factors[0] *= 1.0 - float(config.mlcc_derating)
+    return factors
 
-    esr_new = esr_orig[None, :] * esr_variation
-    imag_scale = xp.sqrt(c_variation * esl_variation)
-    z_imag_new = imag_scale[:, :, None] * z_imag_base[None, :, :]
-    z_cap_varied = esr_new[:, :, None] + 1j * z_imag_new
 
-    count_vector = xp.asarray(count_vector)
-    count_vectors_mc = xp.broadcast_to(count_vector, (n_samples, count_vector.size))
+def calculate_pdn_impedance_monte_carlo(
+    count_vectors: Any,
+    prepared: Dict[str, Any],
+    config: UserConfig,
+    n_samples: int,
+    xp: Any = np,
+    seed: Optional[int] = None,
+) -> Any:
+    """
+    部品公差を考慮した Z_pdn を Monte Carlo で計算する
 
-    z_pdn_mc = _pdn_impedance_core(
-        count_vectors_mc,
-        z_cap_varied,
-        z_mnt_array,
-        parasitic_elements,
-        xp,
-    )
+    各コンデンサ（段）ごとに独立に C/ESR/ESL の倍率をサンプリングし、
+    Z_c' = k_R·Re(Z_c) + j·(Im(Z_c) + ωESL(k_L − 1) − (1/(ωC))·(1/(k_C(1 − derating)) − 1))
+    として部品単体のインピーダンスを摂動させる（ESL, C は prepared の等価値）。
 
-    return z_pdn_mc.astype(z_cap_base.dtype, copy=False)
+    Args:
+        count_vectors: (K, T) 評価する組み合わせ
+        prepared: prepare_pdn_components の結果
+        config: ユーザー設定（tol_C, tol_ESR, tol_ESL, mlcc_derating, seed）
+        n_samples: 1組み合わせあたりのサンプル数
+        xp: バックエンド
+        seed: 乱数シード（既定は config.seed）
+
+    Returns:
+        Z_pdn (K, n_samples, F)
+    """
+    counts = xp.asarray(count_vectors).astype(np.int32, copy=False)
+    if counts.ndim == 1:
+        counts = counts[None, :]
+    n_combo = counts.shape[0]
+    n_freq = prepared['omega'].shape[0]
+    if n_samples <= 0 or n_combo == 0:
+        return xp.zeros((n_combo, max(n_samples, 0), n_freq), dtype=prepared['dtype'])
+
+    omega = prepared['omega']
+    real_dtype = omega.dtype
+    z_c = prepared['z_c']
+    z_mnt = prepared['z_mnt']
+    esr_part = z_c.real
+    x_part = z_c.imag
+    inductive = omega[None, :] * prepared['ESL_nom'][:, None]                       # ωESL (T,F)
+    c_nom = prepared['C_nom']
+    capacitive = xp.where(
+        c_nom[:, None] > 0,
+        1.0 / (omega[None, :] * xp.where(c_nom > 0, c_nom, 1.0)[:, None]),
+        0.0,
+    )                                                                                  # 1/(ωC) (T,F)
+
+    counts_host = transfer_to_host(counts)
+    counts_rep = xp.repeat(counts, n_samples, axis=0)
+    factors = _tolerance_factors(counts_host, n_samples, config, config.seed if seed is None else seed)
+    k_c, k_r, k_l = transfer_to_device(factors.astype(real_dtype), xp)
+
+    def stage_admittance(k: int, types_k: Any) -> Any:
+        kc = k_c[k][:, None]
+        kr = k_r[k][:, None]
+        kl = k_l[k][:, None]
+        x = (
+            x_part[types_k]
+            + inductive[types_k] * (kl - 1.0)
+            - capacitive[types_k] * (1.0 / kc - 1.0)
+        )
+        z = kr * esr_part[types_k] + 1j * x + z_mnt[types_k]
+        return 1.0 / z
+
+    z_pdn = _ladder_impedance(counts_rep, stage_admittance, prepared['parasitic'], xp)
+    return z_pdn.astype(prepared['dtype'], copy=False).reshape(n_combo, n_samples, n_freq)

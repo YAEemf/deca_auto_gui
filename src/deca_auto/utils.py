@@ -4,7 +4,6 @@ import logging
 import sys
 from typing import Optional, Union, Any, Tuple, List, Dict
 from contextlib import contextmanager
-from functools import wraps
 import numpy as np
 
 try:
@@ -150,15 +149,11 @@ def get_backend(force_numpy: bool = False, cuda_device: int = 0) -> Tuple[Any, s
         # CUDAデバイスの確認
         cp.cuda.Device(cuda_device).use()
         
-        # メモリ情報の取得テスト
-        mempool = cp.get_default_memory_pool()
-        pinned_mempool = cp.get_default_pinned_memory_pool()
-        
-        # デバイス情報
+        # CUDA初期化とメモリ情報へのアクセスを確認する。
+        cp.get_default_memory_pool()
+        cp.get_default_pinned_memory_pool()
         device = cp.cuda.Device(cuda_device)
-        props = device.attributes
-        total_memory = device.mem_info[1] / 1024**3  # GB
-        free_memory = device.mem_info[0] / 1024**3  # GB
+        _ = device.attributes, device.mem_info
         
         logger.info(f"CuPyを使用します (GPU {cuda_device})")
         
@@ -329,75 +324,20 @@ def is_gpu_backend(xp: Any) -> bool:
 def transfer_to_host(data: Any, dtype: Optional[np.dtype] = None) -> np.ndarray:
     """ホスト側（NumPy）へ明示的に転送"""
     if isinstance(data, np.ndarray):
-        return data.astype(dtype, copy=False) if dtype is not None and data.dtype != dtype else data
-    if CUPY_AVAILABLE and hasattr(data, "__cuda_array_interface__"):
+        host = data
+    elif CUPY_AVAILABLE and hasattr(data, "__cuda_array_interface__"):
         host = cp.asnumpy(data)
-        if dtype is not None and host.dtype != dtype:
-            host = host.astype(dtype, copy=False)
-        return host
-    host = np.asarray(data)
+    else:
+        host = np.asarray(data)
+
     if dtype is not None and host.dtype != dtype:
-        host = host.astype(dtype, copy=False)
+        return host.astype(dtype, copy=False)
     return host
 
 
 def ensure_numpy(array: Union[np.ndarray, Any]) -> np.ndarray:
-    """
-    配列をNumPy配列に変換（CuPy配列の場合はCPUに転送）
-
-    Args:
-        array: 入力配列
-
-    Returns:
-        np.ndarray: NumPy配列
-
-    Notes:
-        - すでにNumPy配列の場合はコピーを避ける
-        - CuPy配列の場合のみCPU転送を実行
-    """
-    # すでにNumPy配列の場合はそのまま返す（コピー回避）
-    if isinstance(array, np.ndarray):
-        return array
-
-    # CuPy配列の場合
-    if CUPY_AVAILABLE and hasattr(array, "__cuda_array_interface__"):
-        return cp.asnumpy(array)
-
-    # その他の配列様オブジェクト
-    return np.asarray(array)
-
-
-def ensure_cupy(array: Union[np.ndarray, Any], dtype: Optional[np.dtype] = None) -> Any:
-    """
-    配列をCuPy配列に変換（利用可能な場合、そうでなければNumPy配列のまま）
-
-    Args:
-        array: 入力配列
-        dtype: データ型
-
-    Returns:
-        CuPy配列またはNumPy配列
-
-    Notes:
-        - CuPy利用不可の場合はNumPy配列を返す
-        - すでに目的のデバイス・型の場合はコピーを避ける
-    """
-    if not CUPY_AVAILABLE:
-        return np.asarray(array, dtype=dtype) if dtype else np.asarray(array)
-
-    try:
-        # すでにCuPy配列かつ型が一致する場合
-        if hasattr(array, "__cuda_array_interface__"):
-            if dtype is None or array.dtype == dtype:
-                return array
-            return cp.asarray(array, dtype=dtype)
-
-        # NumPy配列からCuPy配列へ転送
-        return cp.asarray(array, dtype=dtype) if dtype else cp.asarray(array)
-
-    except Exception as e:
-        logger.warning(f"CuPy変換エラー: {e}")
-        return np.asarray(array, dtype=dtype) if dtype else np.asarray(array)
+    """配列をNumPyに変換し、CuPy配列はホストへ転送する。"""
+    return transfer_to_host(array)
 
 
 def transfer_to_device(data: Any, xp: Any, dtype: Optional[np.dtype] = None) -> Any:
@@ -429,12 +369,11 @@ def transfer_to_device(data: Any, xp: Any, dtype: Optional[np.dtype] = None) -> 
 
 def xp_array(xp: Any, data: Any, dtype: Optional[np.dtype] = None, copy: bool = False) -> Any:
     """任意のバックエンドに合わせて配列化"""
-    if is_gpu_backend(xp):
-        arr = transfer_to_device(data, xp, dtype)
-        return xp.array(arr, dtype=dtype, copy=copy) if copy else arr
-
-    host = transfer_to_host(data, dtype)
-    return np.array(host, dtype=dtype, copy=copy) if copy else host
+    arr = transfer_to_device(data, xp, dtype)
+    if not copy:
+        return arr
+    backend = xp if is_gpu_backend(xp) else np
+    return backend.array(arr, dtype=dtype, copy=True)
 
 
 # データ型ヘルパー
@@ -573,137 +512,39 @@ def log_metrics(metrics: Optional[Dict[str, Any]]) -> None:
             formatted.append(f"{key}: {value}")
     logger.info("Telemetry metrics -> " + "; ".join(formatted))
 
-# デコレータ版タイマー
-def timed(func):
-    """関数実行時間を計測するデコレータ"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        with Timer(f"Function {func.__name__}"):
-            return func(*args, **kwargs)
-    return wrapper
+def _log_interpolate(x: Any, xp: Any, fp: Any, backend: Any) -> Any:
+    x_flat = backend.asarray(transfer_to_device(x, backend)).ravel()
+    xp_flat = backend.asarray(transfer_to_device(xp, backend)).ravel()
+    fp_flat = backend.asarray(transfer_to_device(fp, backend)).ravel()
+
+    order = backend.argsort(xp_flat)
+    xp_sorted, fp_sorted = xp_flat[order], fp_flat[order]
+    if xp_sorted.size > 1:
+        distinct = backend.concatenate((backend.array([True]), backend.diff(xp_sorted) > 0))
+        xp_sorted, fp_sorted = xp_sorted[distinct], fp_sorted[distinct]
+
+    eps = 1e-300
+    log_x = backend.log10(backend.maximum(x_flat, eps))
+    log_xp = backend.log10(backend.maximum(xp_sorted, eps))
+    log_mag = backend.log10(backend.maximum(backend.abs(fp_sorted), eps))
+    log_interp = backend.interp(log_x, log_xp, log_mag)
+    # 補間範囲外も、最も近い端点の符号を使う（interpの既定動作）。
+    sign_lin = backend.interp(x_flat, xp_sorted, backend.sign(fp_sorted))
+    return backend.where(sign_lin >= 0, 1.0, -1.0) * (10.0 ** log_interp)
 
 
-# 対数補間
 def log_interpolate(x: np.ndarray, xp: np.ndarray, fp: np.ndarray, backend: Any = np) -> np.ndarray:
-    """
-    対数スケール補間（GPU最適化版）
-
-    Args:
-        x: 補間する座標
-        xp: データ点の座標
-        fp: データ点の値
-        backend: バックエンドモジュール（np or cp）
-
-    Returns:
-        補間された値
-
-    Notes:
-        - GPU使用時はCPU転送を回避し、GPU上で直接補間
-        - CPU使用時は従来のNumPy補間を使用
-    """
-    # 共通の前処理ヘルパー
-    def _prepare_data(x_arr, xp_arr, fp_arr, backend_mod):
-        """データの準備と重複除去"""
-        x_flat = backend_mod.asarray(x_arr).ravel()
-        xp_flat = backend_mod.asarray(xp_arr).ravel()
-        fp_flat = backend_mod.asarray(fp_arr).ravel()
-
-        # ソートと重複除去
-        sort_idx = backend_mod.argsort(xp_flat)
-        xp_sorted = xp_flat[sort_idx]
-        fp_sorted = fp_flat[sort_idx]
-
-        if len(xp_sorted) > 1:
-            diff = xp_sorted[1:] - xp_sorted[:-1]
-            uniq_mask = backend_mod.concatenate([backend_mod.array([True]), diff > 0])
-            xp_sorted = xp_sorted[uniq_mask]
-            fp_sorted = fp_sorted[uniq_mask]
-
-        return x_flat, xp_sorted, fp_sorted
-
-    # 共通の補間ロジック
-    def _interpolate_log(x_flat, xp_sorted, fp_sorted, backend_mod, eps=1e-300):
-        """対数補間の実行"""
-        # 絶対値と符号を分離
-        mag = backend_mod.maximum(backend_mod.abs(fp_sorted), eps)
-        sign_src = backend_mod.sign(fp_sorted)
-
-        # 対数変換
-        log_x = backend_mod.log10(backend_mod.maximum(x_flat, eps))
-        log_xp = backend_mod.log10(backend_mod.maximum(xp_sorted, eps))
-        log_mag = backend_mod.log10(mag)
-
-        # 補間実行
-        log_interp = backend_mod.interp(log_x, log_xp, log_mag)
-
-        # 符号の線形補間
-        sign_lin = backend_mod.interp(
-            x_flat, xp_sorted, sign_src,
-            left=float(sign_src[0]),
-            right=float(sign_src[-1])
-        )
-        sign_lin = backend_mod.where(sign_lin >= 0, 1.0, -1.0)
-
-        return sign_lin * (10.0 ** log_interp)
-
-    # GPU版
+    """絶対値を対数補間し、線形補間した符号を適用する。"""
     if CUPY_AVAILABLE and backend is cp:
         try:
-            x_gpu, xp_gpu, fp_gpu = _prepare_data(x, xp, fp, backend)
-            result = _interpolate_log(x_gpu, xp_gpu, fp_gpu, backend)
-            return result
+            return _log_interpolate(x, xp, fp, backend)
         except Exception as e:
             logger.warning(f"GPU補間でエラーが発生、CPUにフォールバック: {e}")
-            # フォールバック
 
-    # CPU版（またはフォールバック）
-    x_cpu, xp_cpu, fp_cpu = _prepare_data(
-        ensure_numpy(x),
-        ensure_numpy(xp),
-        ensure_numpy(fp),
-        np
-    )
-    result = _interpolate_log(x_cpu, xp_cpu, fp_cpu, np)
-
-    # 必要に応じてバックエンドに戻す
+    result = _log_interpolate(x, xp, fp, np)
     if backend is not np and CUPY_AVAILABLE:
         return transfer_to_device(result, backend)
     return result
-
-
-# データのdecimate（間引き）
-def decimate(data: np.ndarray, factor: int, axis: int = 0) -> np.ndarray:
-    """
-    データを間引く
-
-    Args:
-        data: 入力データ
-        factor: 間引き係数（2以上で有効、1以下は元データを返す）
-        axis: 間引く軸（デフォルト: 0）
-
-    Returns:
-        間引かれたデータ
-
-    Examples:
-        >>> data = np.arange(100)
-        >>> decimated = decimate(data, factor=10)
-        >>> len(decimated)
-        10
-        >>> decimated[0], decimated[1]
-        (0, 10)
-
-        >>> data_2d = np.arange(20).reshape(10, 2)
-        >>> decimated_2d = decimate(data_2d, factor=2, axis=0)
-        >>> decimated_2d.shape
-        (5, 2)
-    """
-    if factor <= 1:
-        return data
-
-    # スライスで間引き
-    slices = [slice(None)] * data.ndim
-    slices[axis] = slice(None, None, factor)
-    return data[tuple(slices)]
 
 
 # 周波数グリッド生成
@@ -872,32 +713,6 @@ def create_target_mask(
         raise ValueError(f"未知の目標インピーダンスモード: {mode}")
 
 
-# バッチ処理ヘルパー
-def batch_process(data: Any, batch_size: int, func: callable, 
-                 *args, **kwargs) -> list:
-    """
-    データをバッチ処理
-    
-    Args:
-        data: 入力データ
-        batch_size: バッチサイズ
-        func: 処理関数
-        *args, **kwargs: 追加引数
-    
-    Returns:
-        処理結果のリスト
-    """
-    results = []
-    n = len(data)
-    
-    for i in range(0, n, batch_size):
-        batch = data[i:i+batch_size]
-        result = func(batch, *args, **kwargs)
-        results.append(result)
-    
-    return results
-
-
 # メモリクリーンアップ
 @contextmanager
 def memory_cleanup(xp: Any = None):
@@ -937,22 +752,18 @@ def safe_divide(numerator: Any, denominator: Any, fill_value: float = 0.0,
     Returns:
         除算結果
     """
-    # CuPyはerrstate未対応のため、分岐処理
     if xp is np:
-        # NumPyの場合
         with np.errstate(divide='ignore', invalid='ignore'):
             result = numerator / denominator
-            if np.any(np.isnan(result)) or np.any(np.isinf(result)):
-                mask = np.isfinite(result)
-                result = np.where(mask, result, fill_value)
+        finite = np.isfinite(result)
+        # 有限値だけなら、元の型を保ち結果配列のコピーも不要。
+        if np.all(finite):
+            return result
     else:
-        # CuPyの場合（直接処理）
         result = numerator / denominator
-        # NaNやInfをチェックして置換
-        mask = xp.isfinite(result)
-        result = xp.where(mask, result, fill_value)
-    
-    return result
+        finite = xp.isfinite(result)
+
+    return xp.where(finite, result, fill_value)
 
 
 # プログレスバー用ヘルパー
@@ -1026,7 +837,7 @@ def create_decimated_indices(data_length: int, max_points: int) -> list:
 
     Args:
         data_length: 元データの長さ
-        max_points: 最大点数
+        max_points: 間引き点数の目安
 
     Returns:
         間引き後のインデックスリスト

@@ -61,22 +61,20 @@ model_path = "model"    # SPICEモデルディレクトリ
 max_total_parts = 10    # コンデンサ総数上限
 min_total_parts_ratio = 0.6     # 最小総数比率（これより少ない総数の組み合わせは探索から除外）
 top_k = 15  # 保持する上位候補数
-shuffle_evaluation = true   # 評価順のシャッフル（色々な組み合わせが現れるのでグラフを見てて楽しい。特に何かの役には立たない）
-buffer_limit = 100e6   # バッファサイズ上限
+shuffle_evaluation = true   # 評価順のシャッフル（探索途中から全体に散らばった多様な候補が現れる）
 
 [weights]
-# スコア重み（ある重みを大きくすると、その特性に優れた候補が現れやすくなる）
-weight_max = 0.3        # 最大値（評価帯域内での最大値）
-weight_area = 1.0       # 目標マスクに対する超過面積
-weight_under = 0.1      # 目標マスクに対する不足面積
-weight_mean = 0.2       # 平均値
-weight_anti = 0.3       # 反共振によるピーク
-weight_resonance = 0.1  # 共振による急峻な谷
-weight_flat = 0.0       # 平滑さ
-weight_parts = 0.1      # 部品点数
-weight_num_types = 0.1  # 組み合わせにおける部品の種類数
-weight_mc_worst = 1.0   # Monte Carlo最悪値（部品特性のバラつきを考慮。常に1.0で良いかと）
-ignore_safe_anti_resonance = false  # 目標マスク以下における反共振を無視
+# スコア重み（全項目は同程度のスケールに正規化済み。ある重みを大きくすると、その特性に優れた候補が現れやすくなる）
+weight_max = 1.0        # ピーク：評価帯域内の目標比の最大値（目標の1/2以下で0、目標ちょうどで1）
+weight_area = 1.0       # 超過量：目標を超えた量の帯域平均
+weight_mean = 0.3       # 平均：目標比の帯域平均（目標の1/2以下は飽和）
+weight_anti = 0.5       # 反共振：ピークの周辺からの突出量の合計
+weight_resonance = 0.1  # 共振の谷：急峻な谷の深さの合計
+weight_flat = 0.1       # 平坦さ：目標比の加重標準偏差
+weight_parts = 0.5      # 部品点数：総数 / 10
+weight_num_types = 0.5  # 種類数：種類数 / 5
+weight_mc_worst = 1.0   # Monte Carlo最悪時のインピーダンス評価の悪化量
+ignore_safe_anti_resonance = false  # 目標以下の反共振/谷を無視
 
 [monte_carlo]
 # Monte Carlo設定
