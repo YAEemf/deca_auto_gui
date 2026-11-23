@@ -4,6 +4,9 @@ import os
 import socket
 import subprocess
 import sys
+import threading
+import time
+import webbrowser
 from pathlib import Path
 
 import numpy as np
@@ -24,13 +27,38 @@ def find_available_port(start_port, max_attempts=10):
     raise RuntimeError(f"ポート {start_port} 以降に空きがありません")
 
 
+def _is_listening(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _open_browser_when_ready(process, url, port, timeout=60.0):
+    """サーバが待受を始めたらブラウザを開く。起動に失敗したら何もしない。"""
+    deadline = time.monotonic() + timeout
+    while process.poll() is None and time.monotonic() < deadline:
+        if _is_listening(port):
+            webbrowser.open(url)
+            return
+        time.sleep(0.2)
+    if process.poll() is None:
+        logger.warning("ブラウザを自動で開けませんでした。%s を開いてください", url)
+
+
 def launch_streamlit(config, args):
-    """StreamlitのGUIを起動する。"""
+    """StreamlitのGUIを起動する。
+
+    非ヘッドレス起動では、Streamlitが初回にメールアドレス入力（宣伝メール登録）を
+    端末で求め、AIエージェント用スキルの宣伝も表示する。ヘッドレスで起動して
+    これらを抑止し、ブラウザはこちらで開く。
+    """
     interface_path = Path(__file__).with_name("interface.py")
     port = find_available_port(config.server_port, max_attempts=11)
+    url = f"http://localhost:{port}"
     command = [
         sys.executable, "-m", "streamlit", "run", str(interface_path),
         "--server.port", str(port), "--server.address", "localhost",
+        "--server.headless", "true",
         "--browser.gatherUsageStats", "false",
         "--theme.base", "dark" if config.dark_theme else "light",
     ]
@@ -47,8 +75,19 @@ def launch_streamlit(config, args):
         env["DECA_EXCEL_PATH"] = args.output
     env["DECA_LOG_LEVEL"] = str(logger.level)
 
-    logger.info("起動しています... (http://localhost:%s)", port)
-    subprocess.run(command, env=env, check=True)
+    logger.info("起動しています... (%s)", url)
+    process = subprocess.Popen(command, env=env)
+    try:
+        threading.Thread(
+            target=_open_browser_when_ready, args=(process, url, port), daemon=True,
+        ).start()
+        returncode = process.wait()
+    except BaseException:
+        process.terminate()
+        process.wait()
+        raise
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command)
 
 
 def calculate_zc(config: UserConfig, *, allow_gpu=False):
