@@ -1,10 +1,26 @@
-/src/deca_auto.egg-info
-/src/deca_auto/src/__pycache__
-*.pyc
+# Python / ビルド・テストのキャッシュ
+__pycache__/
+*.py[cod]
+*.egg-info/
+/build/
+/dist/
+/.venv/
+.pytest_cache/
+.cupy_cache/
+
+# 出力ファイル（out/ の説明用txtは管理対象）
 *.xlsx
 *.pptx
 *.docx
+
+# SPICEモデル（各自 model/ に置く。model/ の説明用txtは管理対象）
 *.cir
 *.mod
 *.CKT
-/.venv
+*.ckt
+*.lib
+*.sp
+*.spi
+
+# 個人用の作業ディレクトリ
+/.仮ファイル置き場/
