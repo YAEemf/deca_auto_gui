@@ -22,7 +22,7 @@ from deca_auto.capacitor import (
 from deca_auto.pdn import calculate_pdn_impedance_batch, prepare_pdn_components
 from deca_auto.evaluator import (
     SCORE_COMPONENTS, build_eval_metadata, evaluate_combinations,
-    extract_top_k, monte_carlo_worst,
+    select_top_k,
 )
 from deca_auto.excel_out import export_to_excel
 
@@ -215,7 +215,7 @@ def process_chunk(ctx: OptimizationContext,
                   count_vectors_chunk: np.ndarray,
                   threshold: Optional[float]) -> List[Dict]:
     """
-    チャンクの処理（PDN計算 → 公称スコア → チャンク内top_k → Monte Carlo）
+    チャンクの処理（PDN計算 → 公称スコア → Monte Carloを含む総合スコアのチャンク内top_k）
 
     Args:
         ctx: 最適化コンテキスト
@@ -238,24 +238,17 @@ def process_chunk(ctx: OptimizationContext,
     with profile_block(ctx.metrics, "combination_evaluation"):
         scores, comps = evaluate_combinations(z_pdn, counts, ctx.eval_metadata, config, xp)
 
-    with profile_block(ctx.metrics, "topk_extraction"):
-        # 総合スコア = 公称スコア + w_mc × (MC悪化量 ≥ 0) なので、公称スコアで足切りできる
-        top_idx = extract_top_k(scores, config.top_k, xp, threshold)
+    with profile_block(ctx.metrics, "topk_monte_carlo"):
+        # 総合スコア = 公称スコア + w_mc × (MC悪化量 ≥ 0)。公称スコア順にMCを評価して厳密なtop_kを得る
+        top_idx, totals, mc = select_top_k(scores, comps, counts, config.top_k, threshold,
+                                           ctx.pdn_assets, ctx.eval_metadata, config, xp)
     if top_idx.size == 0:
         return []
 
     idx = transfer_to_device(top_idx, xp) if ctx.is_gpu else top_idx
     top_counts = counts[idx]
     top_comps = {name: value[idx] for name, value in comps.items()}
-    totals = scores[idx]
-
-    if config.mc_enable and config.mc_samples > 0:
-        with profile_block(ctx.metrics, "monte_carlo_evaluation"):
-            mc = monte_carlo_worst(top_counts, top_comps, ctx.pdn_assets, ctx.eval_metadata, config, xp)
-        top_comps['mc_worst'] = mc
-        totals = totals + float(config.weight_mc_worst) * mc
-    else:
-        top_comps['mc_worst'] = xp.zeros_like(totals)
+    top_comps['mc_worst'] = mc
 
     # ホストへ一括転送
     counts_host = transfer_to_host(top_counts)

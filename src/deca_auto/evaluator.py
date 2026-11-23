@@ -21,6 +21,7 @@
 総合スコア = Σ weight_<成分> × 成分
 """
 
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -39,6 +40,7 @@ VIOLATION_GAIN = 4.0               # 目標超過側の s の傾き（目標割�
 PEAK_MIN_DECADE = 0.5 / 20.0        # 0.5dB未満の突出は数値リップルとして無視
 PARTS_REFERENCE = 10.0              # parts成分 = 部品総数 / 10
 TYPES_REFERENCE = 5.0               # num_types成分 = 種類数 / 5
+MC_BATCH_ELEMENTS = 1 << 24         # select_top_k でMCを一括評価するZ配列の要素数上限
 
 
 _SCORE_KERNEL_SOURCE = r"""
@@ -424,35 +426,77 @@ def evaluate_combinations(
     return weighted_sum(comps, config), comps
 
 
-def extract_top_k(
+def select_top_k(
     scores: Any,
+    components: Dict[str, Any],
+    count_vectors: Any,
     k: int,
+    threshold: Optional[float],
+    prepared: Dict[str, Any],
+    eval_metadata: Dict[str, Any],
+    config: UserConfig,
     xp: Any = np,
-    threshold: Optional[float] = None,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, Any, Any]:
     """
-    スコア上位k件（昇順）のインデックスをホスト配列で返す
+    総合スコア（公称スコア + weight_mc_worst × mc_worst）の上位k件を厳密に選ぶ
+
+    mc_worst ≥ 0 なので総合スコア ≥ 公称スコア。公称スコアの昇順にMonte Carloを評価し、
+    次の候補の公称スコアが「現時点のk位の総合スコア」以上になった時点で打ち切る
+    （それ以降の候補はk位に入り得ない）。公称スコアの上位k件だけにMCを適用すると、
+    MCで大きく悪化した候補がk位を占め、公称k+1位以下のより良い候補を取りこぼす。
 
     Args:
-        scores: (B,) スコア
-        k: 抽出数
-        threshold: これ以上のスコアは除外（グローバルtop_kに入り得ない候補の足切り）
+        scores: (B,) 公称スコア
+        components: 公称成分 {成分名: (B,)}
+        count_vectors: (B, T)
+        threshold: グローバルtop_kのk位の総合スコア（これ以上は除外。満杯でなければNone）
+    Returns:
+        (インデックス (K,) ホストint64, 総合スコア (K,) xp, mc_worst (K,) xp)。総合スコアの昇順
     """
     n = int(scores.shape[0])
     k = min(int(k), n)
-    if k <= 0:
-        return np.zeros(0, dtype=np.int64)
-    if xp is np:
-        idx = np.argpartition(scores, k - 1)[:k] if k < n else np.arange(n)
-        idx = idx[np.argsort(scores[idx])]
+    bound = math.inf if threshold is None else float(threshold)
+    use_mc = bool(config.mc_enable) and int(config.mc_samples) > 0
+    n_valid = n if math.isinf(bound) else int((scores < bound).sum())
+    if k <= 0 or n_valid == 0:
+        return np.zeros(0, dtype=np.int64), scores[:0], scores[:0]
+
+    order = xp.argsort(scores)
+    if use_mc:
+        # MCのZ配列 (候補 × サンプル × 周波数) が MC_BATCH_ELEMENTS を超えない範囲でまとめて評価
+        per_combo = int(config.mc_samples) * int(prepared['omega'].shape[0])
+        batch = max(k, MC_BATCH_ELEMENTS // max(per_combo, 1))
     else:
-        # CuPyのargpartitionは内部で全体ソート相当+unravelとなり遅いため、全体のargsortを使う
-        idx = xp.argsort(scores)[:k]
-    idx_host = transfer_to_host(idx).astype(np.int64)
+        batch = k
+        n_valid = min(n_valid, k)
+    w_mc = float(config.weight_mc_worst)
+
+    sel_idx, sel_total, sel_mc = order[:0], scores[:0], scores[:0]
+    for start in range(0, n_valid, batch):
+        idx = order[start:min(start + batch, n_valid)]
+        nominal = scores[idx]
+        if math.isfinite(bound):
+            count = int((nominal < bound).sum())   # 昇順なので先頭 count 件だけが候補
+            if count == 0:
+                break
+            idx, nominal = idx[:count], nominal[:count]
+        if use_mc:
+            mc = monte_carlo_worst(count_vectors[idx], {name: components[name][idx] for name in IMPEDANCE_COMPONENTS},
+                                   prepared, eval_metadata, config, xp)
+        else:
+            mc = xp.zeros_like(nominal)
+        sel_idx = xp.concatenate([sel_idx, idx])
+        sel_total = xp.concatenate([sel_total, nominal + w_mc * mc])
+        sel_mc = xp.concatenate([sel_mc, mc])
+        keep = xp.argsort(sel_total)[:k]
+        sel_idx, sel_total, sel_mc = sel_idx[keep], sel_total[keep], sel_mc[keep]
+        if int(sel_idx.shape[0]) == k:
+            bound = min(bound, float(sel_total[-1]))
+
     if threshold is not None:
-        score_host = transfer_to_host(scores[idx])
-        idx_host = idx_host[score_host < threshold]
-    return idx_host
+        count = int((sel_total < float(threshold)).sum())
+        sel_idx, sel_total, sel_mc = sel_idx[:count], sel_total[:count], sel_mc[:count]
+    return transfer_to_host(sel_idx).astype(np.int64), sel_total, sel_mc
 
 
 def monte_carlo_worst(
