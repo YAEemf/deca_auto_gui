@@ -1,4 +1,3 @@
-import traceback
 from pathlib import Path
 from datetime import datetime
 from typing import Dict
@@ -111,12 +110,12 @@ def export_to_excel(results: Dict, config: UserConfig) -> bool:
         # ワークブック保存
         workbook.close()
         
-        logger.info(f"Excel出力完了: {filepath}")
+        logger.info(f"Excel: {filepath}")
         return True
         
     except Exception as e:
         logger.error(f"Excel出力エラー: {e}")
-        traceback.print_exc()
+        logger.debug("詳細", exc_info=True)
         return False
 
 

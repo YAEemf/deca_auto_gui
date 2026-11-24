@@ -1,6 +1,5 @@
 import logging
 import re
-import traceback
 import warnings
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple, Any, Callable
@@ -74,8 +73,8 @@ def parse_spice_model(model_path: Path) -> Tuple[Optional[str], Optional[List[st
             return None, None
             
     except Exception as e:
-        logger.error(f"SPICEモデル解析エラー: {e}")
-        traceback.print_exc()
+        logger.warning(f"SPICEモデル解析エラー: {e}")
+        logger.debug("詳細", exc_info=True)
         return None, None
 
 
@@ -175,13 +174,13 @@ def simulate_ac_impedance(model_path: Path, f_grid: np.ndarray,
         return z_complex
         
     except Exception as e:
-        logger.error(f"PySpiceシミュレーションエラー: {e}")
-        traceback.print_exc()
+        logger.warning(f"PySpiceシミュレーションエラー: {e}")
+        logger.debug("詳細", exc_info=True)
         return None
 
 
 def apply_vector_fitting(z_samples: np.ndarray, f_grid: np.ndarray,
-                        n_poles: int = 10) -> Optional[np.ndarray]:
+                        n_poles: int = 10, diag: Optional[Dict[str, Any]] = None) -> Optional[np.ndarray]:
     """
     VectorFittingを適用してインピーダンスを近似
     
@@ -189,6 +188,7 @@ def apply_vector_fitting(z_samples: np.ndarray, f_grid: np.ndarray,
         z_samples: サンプルインピーダンス
         f_grid: 周波数グリッド
         n_poles: 極の数
+        diag: 指定すると最大相対誤差を 'vf_error' に記録する
     
     Returns:
         近似されたインピーダンス（失敗時はNone）
@@ -226,15 +226,15 @@ def apply_vector_fitting(z_samples: np.ndarray, f_grid: np.ndarray,
         if not validate_result(z_fitted, "VectorFitting結果"):
             return None
         rel_err = float(np.max(np.abs(z_fitted - z_samples) / np.maximum(np.abs(z_samples), 1e-30)))
+        if diag is not None:
+            diag['vf_error'] = rel_err
         if rel_err > VF_TOLERANCE:
-            logger.info(f"VectorFittingの再現誤差 {rel_err:.1%} が許容値を超えたためAC解析結果を使用します")
             return None
         
         return z_fitted
         
     except Exception as e:
-        logger.warning(f"VectorFittingエラー: {e}")
-        traceback.print_exc()
+        logger.debug(f"VectorFittingエラー: {e}", exc_info=True)
         return None
 
 
@@ -381,7 +381,8 @@ def estimate_rlc_parameters(z_c: np.ndarray, f_grid: np.ndarray) -> Tuple[float,
 def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
                                         model_path: Path, dc_bias: float,
                                         xp: Any = np, L_mntN: float = 0.2e-10,
-                                        dtype: Optional[Any] = None) -> Tuple[np.ndarray, float]:
+                                        dtype: Optional[Any] = None,
+                                        info: Optional[Dict[str, Any]] = None) -> Tuple[np.ndarray, float]:
     """
     単一コンデンサの部品単体インピーダンスを計算
     
@@ -393,6 +394,7 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
         xp: バックエンドモジュール
         L_mntN: 呼び出し互換性のための引数（計算には使用しない）
         dtype: 戻り値の配列データ型
+        info: 指定すると使用したモデルの説明を 'model' に記録する
     
     Returns:
         (z_c, capacitance): インピーダンスと容量値
@@ -401,6 +403,7 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
     
     z_c = None
     capacitance = to_float(cap_config.get('C'))
+    model = "RLC"
     
     # SPICEモデルが指定されている場合
     if 'path' in cap_config and cap_config['path']:
@@ -436,36 +439,41 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
             z_samples = simulate_ac_impedance(spice_path, f_host, dc_bias)
             
             if z_samples is not None:
-                # VectorFitting適用
-                z_fitted = apply_vector_fitting(z_samples, f_host)
+                # VectorFitting適用（再現誤差が大きければAC解析結果をそのまま使う）
+                diag: Dict[str, Any] = {}
+                z_fitted = apply_vector_fitting(z_samples, f_host, diag=diag)
+                vf_error = diag.get('vf_error')
                 if z_fitted is not None:
                     z_c = z_fitted
-                    logger.info(f"{name}: SPICEモデル + VectorFitting成功")
+                    model = f"SPICE+VF (誤差 {vf_error:.1%})"
                 else:
                     z_c = z_samples
-                    logger.info(f"{name}: SPICEモデル使用（VectorFittingスキップ）")
+                    model = (f"SPICE AC (VF誤差 {vf_error:.0%})" if vf_error is not None
+                             else "SPICE AC (VF不可)")
                 
                 # 設定に容量が無い場合は低域から推定する。
                 if capacitance is None:
                     capacitance = estimate_capacitance_from_impedance(
                         z_c, f_host, method='low_freq'
                     )
-                    if capacitance >= 1e-6:
-                        logger.info(f"{name}: 推定容量 = {capacitance*1e6:.3f}μF")
-                    else:
-                        logger.info(f"{name}: 推定容量 = {capacitance*1e9:.3f}nF")
+            else:
+                model = "RLC (SPICE失敗)"
+                logger.warning(f"{name}: SPICE解析に失敗したためRLC値で計算します ({spice_path})")
         else:
-            logger.warning(f"SPICEモデルが見つかりません: {spice_path}")
+            model = "RLC (モデルなし)"
+            logger.warning(f"{name}: SPICEモデルが見つからないためRLC値で計算します ({spice_path})")
     
     # RLCフォールバック
     if z_c is None:
         z_c = calculate_rlc_impedance(cap_config, f_grid, xp)
-        logger.info(f"{name}: RLCモデル使用")
         
         # 容量値確認
         if capacitance is None:
             capacitance = to_float(cap_config.get('C'), 1e-6)
     
+    if info is not None:
+        info['model'] = model
+
     # GPU転送（必要な場合）
     z_c = transfer_to_device(z_c, xp, dtype)
 
@@ -475,7 +483,8 @@ def calculate_single_capacitor_impedance(cap_config: Dict, f_grid: np.ndarray,
 def calculate_all_capacitor_impedances(config: UserConfig, f_grid: np.ndarray,
                                       xp: Any = np,
                                       gui_callback: Optional[Callable] = None,
-                                      dtype: Optional[Any] = None) -> Dict[str, np.ndarray]:
+                                      dtype: Optional[Any] = None,
+                                      model_info: Optional[Dict[str, str]] = None) -> Dict[str, np.ndarray]:
     """
     全コンデンサの部品単体インピーダンスを計算（マウント寄生はPDN側で加算）
     
@@ -485,20 +494,21 @@ def calculate_all_capacitor_impedances(config: UserConfig, f_grid: np.ndarray,
         xp: バックエンドモジュール
         gui_callback: GUI更新コールバック
         dtype: 戻り値の配列データ型
+        model_info: 指定すると {name: 使用モデルの説明} を記録する
     
     Returns:
         {name: z_c} の辞書
     """
     capacitor_impedances = {}
-    capacitances = {}
     
     model_path = Path(config.model_path)
     gui_frequency = transfer_to_host(f_grid) if gui_callback else None
     
     progress = get_progress_bar(
         config.capacitors,
-        desc="コンデンサZ_c計算",
-        total=len(config.capacitors)
+        desc="Z_c計算",
+        total=len(config.capacitors),
+        unit="種",
     )
     
     for cap_config in progress:
@@ -513,6 +523,7 @@ def calculate_all_capacitor_impedances(config: UserConfig, f_grid: np.ndarray,
             cap_config['name'] = name
         
         # インピーダンス計算
+        info: Dict[str, Any] = {}
         z_c, capacitance = calculate_single_capacitor_impedance(
             cap_config,
             f_grid,
@@ -520,10 +531,12 @@ def calculate_all_capacitor_impedances(config: UserConfig, f_grid: np.ndarray,
             config.dc_bias,
             xp,
             dtype=dtype,
+            info=info,
         )
+        if model_info is not None:
+            model_info[name] = info.get('model', 'RLC')
         
         capacitor_impedances[name] = z_c
-        capacitances[name] = capacitance
         
         # GUI更新
         if gui_callback:
@@ -534,14 +547,5 @@ def calculate_all_capacitor_impedances(config: UserConfig, f_grid: np.ndarray,
                 'capacitance': capacitance,
                 'frequency': gui_frequency
             })
-    
-    logger.info(f"各コンデンサZ_c計算完了：{len(capacitor_impedances)}種類")
-    
-    # 容量でソート情報を出力
-    sorted_names = sorted(capacitances.keys(), key=lambda k: capacitances[k])
-    for name in sorted_names:
-        c_value = capacitances[name]
-        c_str = f"{c_value*1e6:.3f}μF" if c_value >= 1e-6 else f"{c_value*1e9:.3f}nF"
-        logger.info(f"{name}: {c_str}")
     
     return capacitor_impedances

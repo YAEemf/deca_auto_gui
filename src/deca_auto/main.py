@@ -1,18 +1,18 @@
 import math
-import traceback
+import time
 from typing import Optional, Dict, List, Any, Callable, Iterable
 import numpy as np
 from dataclasses import dataclass, field
 
-from deca_auto.config import UserConfig, validate_config, resolve_capacitor_usage_bounds
+from deca_auto.config import ConfigError, UserConfig, validate_config, resolve_capacitor_usage_bounds
 from deca_auto.utils import (
     logger, get_backend, get_gpu_info, get_vram_budget,
     generate_frequency_grid, create_evaluation_mask, create_target_mask,
     Timer, memory_cleanup, get_progress_bar, transfer_to_device,
     transfer_to_host, get_dtype, ensure_numpy, to_float,
-    get_custom_mask_freq_range,
+    get_custom_mask_freq_range, format_si, format_table, auto_target_terms,
     profile_block, increment_metric, update_metric_max, get_memory_snapshot,
-    log_metrics,
+    log_metrics, CUPY_AVAILABLE,
 )
 from deca_auto.capacitor import (
     calculate_all_capacitor_impedances,
@@ -22,7 +22,7 @@ from deca_auto.capacitor import (
 from deca_auto.pdn import calculate_pdn_impedance_batch, prepare_pdn_components
 from deca_auto.evaluator import (
     SCORE_COMPONENTS, build_eval_metadata, evaluate_combinations,
-    select_top_k,
+    format_combination_name, select_top_k,
 )
 from deca_auto.excel_out import export_to_excel
 
@@ -204,10 +204,6 @@ def build_combination_space(
     hi = min(max_total, int(max_counts.sum()))
     if lo > hi or np.any(min_counts > max_counts):
         logger.warning("指定された使用数の範囲では有効な組み合わせが存在しません")
-    logger.info(
-        f"組み合わせ生成: {num_capacitors}種類, 総数{lo}～{hi}個, "
-        f"個別範囲min={min_counts.tolist()}, max={max_counts.tolist()}"
-    )
     return CombinationSpace(min_counts, np.maximum(max_counts, min_counts), lo, max(hi, 0))
 
 
@@ -309,6 +305,63 @@ def _capacitor_rlc_params(config: UserConfig, names: List[str],
     return params
 
 
+def log_capacitor_table(names: List[str], model_info: Dict[str, str],
+                        rlc_params: Dict[str, Dict[str, float]],
+                        bounds: Optional[tuple] = None) -> None:
+    """コンデンサ一覧（容量の小さい順）を表で出力する。"""
+    headers = ["#", "名前", "モデル", "C", "ESL"]
+    align = "rllrr"
+    if bounds is not None:
+        headers.append("使用数")
+        align += "r"
+    rows = []
+    for i, name in enumerate(names):
+        row = [i + 1, name, model_info.get(name, "RLC"),
+               format_si(rlc_params[name]['C'], "F"), format_si(rlc_params[name]['ESL'], "H")]
+        if bounds is not None:
+            lo, hi = int(bounds[0][i]), int(bounds[1][i])
+            row.append(f"{lo}–{hi}" if lo != hi else f"{lo}")
+        rows.append(row)
+    logger.info(f"コンデンサ: {len(names)}種類\n" + format_table(headers, rows, align))
+
+
+def _target_summary(config: UserConfig, target_mask_host: np.ndarray, eval_idx: np.ndarray) -> str:
+    """目標インピーダンスの要約（モード、値）"""
+    band = target_mask_host[eval_idx] if eval_idx.size else target_mask_host
+    lo, hi = float(np.min(band)), float(np.max(band))
+    if config.target_impedance_mode == "custom" and config.z_custom_mask:
+        return f"{format_si(lo, 'Ω')} – {format_si(hi, 'Ω')} (custom, {len(config.z_custom_mask)}点)"
+    if config.target_impedance_mode == "auto":
+        delta_v, i_trans = auto_target_terms(config.v_supply, config.ripple_ratio, config.ripple_voltage,
+                                             config.i_max, config.switching_activity, config.i_transient)
+        return (f"{format_si(lo, 'Ω')} (auto: ΔV {format_si(delta_v, 'V')}, ΔI {format_si(i_trans, 'A')}, "
+                f"margin {config.design_margin:g} %)")
+    return f"{format_si(lo, 'Ω')} ({config.target_impedance_mode})"
+
+
+def log_top_k_summary(top_k: List[Dict], cap_names: List[str], frequency_grid: np.ndarray,
+                      target_mask_host: np.ndarray, eval_idx: np.ndarray, limit: int = 5) -> None:
+    """上位候補の要約。最大|Z|/Ztは評価帯域内での目標比（正なら目標超過）とその周波数。"""
+    if not top_k or eval_idx.size == 0:
+        return
+    freqs = frequency_grid[eval_idx]
+    target = np.maximum(target_mask_host[eval_idx], 1e-30)
+    rows = []
+    for result in top_k[:limit]:
+        counts = np.asarray(result['count_vector'])
+        ratio = np.abs(np.asarray(result['z_pdn']))[eval_idx] / target
+        worst = int(np.argmax(ratio))
+        rows.append([
+            result.get('rank', len(rows) + 1), f"{result['total_score']:.4f}",
+            int(counts.sum()), int(np.count_nonzero(counts)),
+            f"{20.0 * np.log10(ratio[worst]):+.1f} dB", format_si(freqs[worst], "Hz"),
+            format_combination_name(counts, cap_names),
+        ])
+    shown = f"上位{len(rows)}件 / {len(top_k)}件" if len(top_k) > len(rows) else f"上位{len(rows)}件"
+    logger.info(f"結果: {shown}\n" + format_table(
+        ["順位", "スコア", "個数", "種類", "最大|Z|/Zt", "周波数", "組み合わせ"], rows, "rrrrrrl"))
+
+
 def run_optimization(config: UserConfig,
                      gui_callback: Optional[Callable] = None,
                      stop_event: Optional[Any] = None) -> Dict:
@@ -324,25 +377,25 @@ def run_optimization(config: UserConfig,
         最適化結果（ホスト配列のみ）
     """
     if not validate_config(config):
-        raise ValueError("設定が無効です")
+        raise ConfigError("設定が無効です")
+    started = time.perf_counter()
 
     xp, backend_name, is_gpu = get_backend(force_numpy=config.force_numpy, cuda_device=config.cuda)
     gpu_info = get_gpu_info(config.cuda) if is_gpu else None
-    if gpu_info:
-        logger.info(f"選択中GPU: {gpu_info['name']} \n"
-                    f"Total: {gpu_info['total_memory_gb']:.2f}GB, "
-                    f"Free: {gpu_info['free_memory_gb']:.2f}GB")
 
     dtype_c = np.dtype(get_dtype(config.dtype_c))
     dtype_r = np.dtype(get_dtype(config.dtype_r))
 
-    vram_budget, _ = get_vram_budget(config.max_vram_ratio_limit, config.cuda)
-    logger.info(f"メモリバジェット: {vram_budget / 1024**3:.2f}GB")
+    vram_budget, _ = get_vram_budget(config.max_vram_ratio_limit, config.cuda, use_gpu=is_gpu)
+    if gpu_info:
+        logger.info(f"計算: GPU {config.cuda} {gpu_info['name']} (VRAM 空き {gpu_info['free_memory_gb']:.1f} / "
+                    f"{gpu_info['total_memory_gb']:.1f} GB, 上限 {vram_budget / 1024**3:.1f} GB)")
+    else:
+        logger.info(f"計算: CPU (NumPy{'' if CUPY_AVAILABLE else ', CuPy未導入'})")
 
     with Timer("周波数グリッド生成"):
         f_grid = generate_frequency_grid(config.f_start, config.f_stop,
                                          config.num_points_per_decade, xp, dtype_r)
-        logger.info(f"周波数点数: {len(f_grid)}")
     f_grid_host = transfer_to_host(f_grid)
 
     # 評価帯域（カスタムマスクモードではマスクの定義帯域を使用）
@@ -351,24 +404,27 @@ def run_optimization(config: UserConfig,
         custom_f_L, custom_f_H = get_custom_mask_freq_range(config.z_custom_mask)
         if custom_f_L is not None and custom_f_H is not None:
             eval_f_L, eval_f_H = custom_f_L, custom_f_H
-            logger.info(f"カスタムマスクモードによる評価帯域: {eval_f_L:.2e} - {eval_f_H:.2e} Hz")
     eval_mask = create_evaluation_mask(f_grid, eval_f_L, eval_f_H, xp)
 
     target_mask = create_target_mask(f_grid, config.z_target, config.z_custom_mask, xp,
                                      mode=config.target_impedance_mode, config=config)
     target_mask_host = transfer_to_host(target_mask)
     eval_metadata = build_eval_metadata(f_grid, eval_mask, target_mask, xp)
-    logger.info(f"評価帯域内の周波数点数: {eval_metadata['n_eval']}")
+    eval_idx_host = np.asarray(transfer_to_host(eval_metadata['indices']), dtype=np.int64)
+    logger.info(f"周波数: {format_si(config.f_start, 'Hz')} – {format_si(config.f_stop, 'Hz')}, {len(f_grid_host)}点"
+                f" (評価 {format_si(eval_f_L, 'Hz')} – {format_si(eval_f_H, 'Hz')}, {eval_metadata['n_eval']}点)")
+    logger.info(f"目標: {_target_summary(config, target_mask_host, eval_idx_host)}")
 
+    model_info: Dict[str, str] = {}
     with Timer("コンデンサインピーダンス計算"):
-        cap_impedances = calculate_all_capacitor_impedances(config, f_grid, xp, gui_callback, dtype_c)
+        cap_impedances = calculate_all_capacitor_impedances(config, f_grid, xp, gui_callback, dtype_c,
+                                                            model_info=model_info)
 
     # 容量の小さい順に並べる（測定ノード側が小容量）
     rlc_params = _capacitor_rlc_params(config, list(cap_impedances.keys()), cap_impedances, f_grid_host)
     sorted_cap_names = sorted(cap_impedances.keys(), key=lambda n: rlc_params[n]['C'])
     sorted_cap_impedances = {name: cap_impedances[name] for name in sorted_cap_names}
     pdn_assets = prepare_pdn_components(sorted_cap_impedances, config, f_grid, xp, dtype_c, rlc_params)
-    logger.info(f"コンデンサ候補（容量小→大）: {sorted_cap_names}")
 
     ctx = OptimizationContext(
         config=config,
@@ -401,20 +457,24 @@ def run_optimization(config: UserConfig,
             num_capacitors, max_total_parts, min_total, min_counts_arr, max_counts_arr,
         )
     total_combinations = combination_space.total
-    logger.info(f"組み合わせ総数: {total_combinations}")
+    log_capacitor_table(sorted_cap_names, model_info, rlc_params,
+                        (combination_space.min_counts, combination_space.max_counts))
 
     global_top_k: List[Dict] = []
     processed = 0
+    search_error: Optional[str] = None
 
     if total_combinations > 0:
         chunk_size = _decide_chunk_size(total_combinations, len(f_grid), eval_metadata['n_eval'],
                                         num_capacitors, dtype_c, dtype_r, vram_budget, is_gpu)
-        logger.info(f"チャンクサイズ: {chunk_size} Combi/Chunk")
+        logger.info(f"組み合わせ: {total_combinations:,}通り (総数 {combination_space.min_total}–"
+                    f"{combination_space.max_total}個, {chunk_size:,}通り/チャンク)")
         combination_iterator = combination_space.iter_chunks(
             chunk_size, xp, shuffle=config.shuffle_evaluation, seed=config.seed,
         )
 
-        progress = get_progress_bar(range(total_combinations), desc="探索処理", total=total_combinations)
+        progress = get_progress_bar(range(total_combinations), desc="探索", total=total_combinations,
+                                    unit="通り")
         progress_update = getattr(progress, "update", None)
         progress_close = getattr(progress, "close", None)
 
@@ -422,7 +482,6 @@ def run_optimization(config: UserConfig,
             with memory_cleanup(xp):
                 for count_vectors_chunk in combination_iterator:
                     if ctx.should_stop():
-                        logger.info("探索を停止しました")
                         break
                     if count_vectors_chunk is None or len(count_vectors_chunk) == 0:
                         continue
@@ -431,7 +490,6 @@ def run_optimization(config: UserConfig,
                                  if len(global_top_k) >= config.top_k else None)
                     candidates = process_chunk(ctx, count_vectors_chunk, threshold)
                     if ctx.should_stop():
-                        logger.info("停止リクエストを検知したため探索を終了します")
                         break
 
                     global_top_k = update_global_top_k(global_top_k, candidates, config.top_k)
@@ -449,10 +507,10 @@ def run_optimization(config: UserConfig,
                             'target_mask': target_mask_host,
                         })
         except KeyboardInterrupt:
-            logger.info("探索が中断されました")
+            ctx.stop_flag = True
         except Exception as e:
-            logger.error(f"探索エラー: {e}")
-            traceback.print_exc()
+            search_error = str(e)
+            logger.exception(f"探索エラー: {e}")
         finally:
             if progress_close:
                 progress_close()
@@ -487,13 +545,21 @@ def run_optimization(config: UserConfig,
         'capacitor_impedances': host_cap_impedances,
         'eval_metadata': host_eval_metadata,
         'stopped': bool(ctx.stop_flag),
+        'error': search_error,
     }
 
+    log_top_k_summary(global_top_k, sorted_cap_names, f_grid_host, target_mask_host, eval_idx_host)
     if global_top_k and not ctx.stop_flag:
         with Timer("Excel出力"):
             export_to_excel(results, config)
 
-    logger.info("最適化処理が完了しました")
+    elapsed = time.perf_counter() - started
+    if ctx.stop_flag:
+        logger.info(f"停止: {processed:,} / {total_combinations:,}通りを評価 ({elapsed:.2f} s)")
+    elif search_error:
+        logger.error(f"探索エラーのため {processed:,} / {total_combinations:,}通りで終了しました ({elapsed:.2f} s)")
+    else:
+        logger.info(f"完了: {elapsed:.2f} s")
     log_metrics(ctx.metrics)
     return results
 

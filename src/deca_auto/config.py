@@ -1,7 +1,6 @@
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Union
 import tomlkit
-import traceback
 from dataclasses import dataclass, field, asdict
 import numpy as np
 
@@ -190,6 +189,13 @@ WEIGHT_FIELDS: Tuple[str, ...] = (
 # 重みスライダーの範囲 (min, max, step)
 WEIGHT_RANGE: Tuple[float, float, float] = (0.0, 3.0, 0.05)
 
+class ConfigError(ValueError):
+    """設定が無効（理由はログ出力済み）"""
+
+
+# [[capacitors]] で使うキー
+CAPACITOR_KEYS: Tuple[str, ...] = ("name", "path", "C", "ESR", "ESL", "L_mnt", "derating", "MIN", "MAX")
+
 # 廃止済みパラメーター（旧TOMLに含まれていても警告のみで無視する）
 DEPRECATED_FIELDS: Tuple[str, ...] = (
     "weight_under",
@@ -251,6 +257,9 @@ def _load_config_field(config: UserConfig, key: str, value: Any) -> None:
                 else:
                     if v_unwrapped is not None:
                         cap_dict[k] = v_unwrapped
+                    known = {key.lower(): key for key in CAPACITOR_KEYS}
+                    hint = f"（{known[k.lower()]} の誤り？）" if k.lower() in known else ""
+                    logger.warning(f"コンデンサ '{cap_data.get('name', '?')}' の未知のキー '{k}' は使用しません{hint}")
 
             path_val = cap_dict.get("path", "")
             raw_name = cap_dict.get("name", "")
@@ -287,11 +296,29 @@ def _load_config_field(config: UserConfig, key: str, value: Any) -> None:
     elif isinstance(value, str) and key.startswith(("f_", "R_", "L_", "C_", "z_", "tol_", "tan_", "dc_", "mlcc_", "max_vram_", "min_total_", "weight_", "v_", "i_", "ripple_", "switching_", "design_")):
         try:
             parsed_value = parse_scientific_notation(value)
-            setattr(config, key, parsed_value)
         except Exception:
-            print(f"警告: パラメータ {key} の解析に失敗: {value}")
+            raise ValueError(f"{key} = {value!r} を数値として解釈できません") from None
+        setattr(config, key, parsed_value)
     else:
-        setattr(config, key, value)
+        setattr(config, key, _check_scalar_type(key, value, config.__dataclass_fields__[key].default))
+
+
+def _check_scalar_type(key: str, value: Any, default: Any) -> Any:
+    """既定値が数値・真偽値の項目について、TOMLの値の型を確かめる。"""
+    if isinstance(default, bool):
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} = {value!r} は true / false で指定してください")
+    elif isinstance(default, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, str):
+            try:
+                value = parse_scientific_notation(value)
+            except Exception:
+                raise ValueError(f"{key} = {value!r} を数値として解釈できません") from None
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"{key} = {value!r} は数値で指定してください")
+        if isinstance(default, int) and float(value).is_integer():
+            value = int(value)
+    return value
 
 
 # TOML has no null value. Record explicit omissions alongside the regular values.
@@ -309,6 +336,8 @@ def load_config(
     if config_path is None:
         return config
 
+    if verbose:
+        logger.info(f"設定: {config_path}")
     try:
         with Path(config_path).open(encoding="utf-8") as file:
             data = tomlkit.load(file).unwrap()
@@ -327,9 +356,9 @@ def load_config(
             elif key in config.__dataclass_fields__:
                 _load_config_field(config, key, value)
                 if verbose:
-                    print(f"  {key} = {value}")
-            elif verbose:
-                print(f"警告: 未知のパラメータ '{key}' をスキップ")
+                    logger.debug(f"  {key} = {value}")
+            else:
+                logger.warning(f"未知のパラメータ '{key}' を無視します")
 
         # 旧形式のTOMLで代替パラメーターだけが指定されている場合はそちらを使う。
         if "ripple_voltage" in values and "ripple_ratio" not in values:
@@ -345,8 +374,6 @@ def load_config(
             for name in names:
                 cap.setdefault(name, None)
 
-        if verbose:
-            print(f"=== 設定ファイルを読み込みました: {config_path} ===")
     except Exception as exc:
         if strict:
             raise
@@ -426,12 +453,12 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
         with open(config_path, "w", encoding="utf-8") as f:
             tomlkit.dump(doc, f)
 
-        print(f"設定を保存しました: {config_path}")
+        logger.info(f"設定を保存しました: {config_path}")
         return True
 
     except Exception as e:
-        print(f"設定ファイルの保存エラー: {e}")
-        traceback.print_exc()
+        logger.error(f"設定ファイルの保存エラー: {e}")
+        logger.debug("詳細", exc_info=True)
         return False
 
 
@@ -467,7 +494,7 @@ def validate_config(config: UserConfig) -> bool:
 
             # ripple_ratio と ripple_voltage は排他的
             if config.ripple_ratio is not None and config.ripple_voltage is not None:
-                print("警告: ripple_ratio と ripple_voltage が両方設定されています。ripple_voltage を優先します")
+                logger.warning("ripple_ratio と ripple_voltage が両方設定されているため ripple_voltage を使います")
 
             if config.ripple_ratio is not None:
                 assert 0 < config.ripple_ratio <= 100, "許容リップル率は0-100%の範囲である必要があります"
@@ -478,7 +505,7 @@ def validate_config(config: UserConfig) -> bool:
 
             # switching_activity と i_transient は排他的
             if config.switching_activity is not None and config.i_transient is not None:
-                print("警告: switching_activity と i_transient が両方設定されています。i_transient を優先します")
+                logger.warning("switching_activity と i_transient が両方設定されているため i_transient を使います")
 
             if config.switching_activity is not None:
                 assert 0 < config.switching_activity <= 1, "電流変動率は0-1の範囲である必要があります"
@@ -554,7 +581,10 @@ def validate_config(config: UserConfig) -> bool:
         return True
         
     except AssertionError as e:
-        print(f"設定検証エラー: {e}")
+        logger.error(f"設定が無効です: {e}")
+        return False
+    except (TypeError, ValueError) as e:
+        logger.error(f"設定値の型が不正です: {e}")
         return False
 
 

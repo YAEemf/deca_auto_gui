@@ -1,5 +1,4 @@
 import time
-import traceback
 import logging
 import sys
 from typing import Optional, Union, Any, Tuple, List, Dict
@@ -12,7 +11,6 @@ try:
 except ImportError:
     cp = None
     CUPY_AVAILABLE = False
-    print("CuPyが利用できません。NumPyモードで動作します。")
 
 try:
     from tomlkit.items import Item as _TomlItem
@@ -21,73 +19,103 @@ except ImportError:
 
 
 # ロガー設定
-def setup_logger(name: str = "deca_auto", level: int = logging.INFO) -> logging.Logger:
-    """
-    ロガーのセットアップ
-    
-    Args:
-        name: ロガー名
-        level: ログレベル
-    
-    Returns:
-        logging.Logger: 設定されたロガー
-    """
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-    logger.disabled = False
+class _ConsoleFormatter(logging.Formatter):
+    """INFOは本文のみ、WARNING以上は種別を前置する。DEBUG時は時刻とレベルを付ける。"""
 
-    formatter = logging.Formatter(
-        '[%(asctime)s %(levelname)s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    _PREFIX = {logging.WARNING: "警告: ", logging.ERROR: "エラー: ", logging.CRITICAL: "エラー: "}
 
-    stream_handler = None
-    for handler in logger.handlers:
-        if isinstance(handler, logging.StreamHandler):
-            stream_handler = handler
-            break
+    def __init__(self, detailed: bool = False):
+        super().__init__(datefmt='%H:%M:%S')
+        self.detailed = detailed
 
-    if stream_handler is None:
-        stream_handler = logging.StreamHandler(stream=sys.stdout)
-        logger.addHandler(stream_handler)
-    else:
+    def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        if self.detailed:
+            text = f"{self.formatTime(record, self.datefmt)} {record.levelname:<7} {message}"
+        else:
+            text = self._PREFIX.get(record.levelno, "") + message
+        if record.exc_info:
+            text += "\n" + self.formatException(record.exc_info)
+        return text
+
+
+class _ConsoleHandler(logging.StreamHandler):
+    """tqdmのプログレスバーを崩さずに標準出力へ書く。"""
+
+    def __init__(self):
+        super().__init__(stream=sys.stdout)
+
+    def emit(self, record: logging.LogRecord) -> None:
         try:
-            stream_handler.setStream(sys.stdout)
-        except AttributeError:
-            stream_handler.stream = sys.stdout
+            message = self.format(record)
+            try:
+                from tqdm import tqdm
+                tqdm.write(message, file=sys.stdout)
+            except ImportError:
+                print(message, file=sys.stdout, flush=True)
+        except Exception:
+            self.handleError(record)
 
-    stream_handler.setLevel(level)
-    stream_handler.setFormatter(formatter)
 
-    # 既存ハンドラがある場合もレベルとフォーマットを揃える
-    for handler in logger.handlers:
-        handler.setLevel(level)
-        if isinstance(handler, logging.StreamHandler) and handler is not stream_handler:
-            handler.setFormatter(formatter)
-
+def setup_logger(name: str = "deca_auto", level: int = logging.INFO) -> logging.Logger:
+    """deca_autoロガーに標準出力ハンドラを1つだけ設定する。"""
+    logger = logging.getLogger(name)
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+    handler = _ConsoleHandler()
+    logger.addHandler(handler)
     logger.propagate = False
-
-    # ルートロガーがWARNING以上の場合、情報出力が抑制されるため揃えておく
-    root_logger = logging.getLogger()
-    if root_logger.level > level:
-        root_logger.setLevel(level)
-
+    set_log_level(level, logger)
     return logger
+
+
+def set_log_level(level: int, target: Optional[logging.Logger] = None):
+    """ロガーとハンドラのレベル、表示形式（DEBUG時は詳細）を更新する。"""
+    target = target or logger
+    target.setLevel(level)
+    target.disabled = False
+    for handler in target.handlers:
+        handler.setLevel(level)
+        handler.setFormatter(_ConsoleFormatter(detailed=level <= logging.DEBUG))
 
 
 # グローバルロガー
 logger = setup_logger()
 
 
-def set_log_level(level: int):
-    """ロガーと既存ハンドラのレベルを更新"""
-    logger.setLevel(level)
-    for handler in logger.handlers:
-        handler.setLevel(level)
-    logger.disabled = False
-    root_logger = logging.getLogger()
-    if root_logger.level > level:
-        root_logger.setLevel(level)
+_SI_PREFIXES = ((1e9, "G"), (1e6, "M"), (1e3, "k"), (1.0, ""), (1e-3, "m"), (1e-6, "μ"), (1e-9, "n"), (1e-12, "p"))
+
+
+def format_si(value: Optional[float], unit: str = "", digits: int = 3) -> str:
+    """SI接頭辞付きで有効数字digits桁に整形する（例: 0.0102, "Ω" -> "10.2 mΩ"）。"""
+    if value is None or not np.isfinite(value):
+        return "-"
+    if value == 0:
+        return f"0 {unit}".rstrip()
+    magnitude = abs(value)
+    scale, prefix = next(((s, p) for s, p in _SI_PREFIXES if magnitude >= s * 0.9995), _SI_PREFIXES[-1])
+    return f"{value / scale:.{digits}g} {prefix}{unit}".rstrip()
+
+
+def format_table(headers: List[str], rows: List[List[Any]], align: Optional[str] = None,
+                 indent: str = "  ") -> str:
+    """等幅の表を文字列で返す。alignは列ごとの 'l'/'r'（既定は左寄せ）。全角文字は幅2で数える。"""
+    import unicodedata
+
+    def width(text: str) -> int:
+        return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+    cells = [[str(c) for c in headers]] + [[str(c) for c in row] for row in rows]
+    widths = [max(width(row[i]) for row in cells) for i in range(len(headers))]
+    align = align or "l" * len(headers)
+    lines = []
+    for row in cells:
+        parts = []
+        for i, cell in enumerate(row):
+            pad = " " * (widths[i] - width(cell))
+            parts.append(pad + cell if align[i] == "r" else cell + pad)
+        lines.append(indent + "  ".join(parts).rstrip())
+    return "\n".join(lines)
 
 
 def unwrap_toml_value(value: Any) -> Any:
@@ -142,7 +170,6 @@ def get_backend(force_numpy: bool = False, cuda_device: int = 0) -> Tuple[Any, s
         (xp, backend_name, is_gpu): バックエンドモジュール、名前、GPU使用フラグ
     """
     if force_numpy or not CUPY_AVAILABLE:
-        logger.info("NumPyを使用します")
         return np, "numpy", False
     
     try:
@@ -155,13 +182,10 @@ def get_backend(force_numpy: bool = False, cuda_device: int = 0) -> Tuple[Any, s
         device = cp.cuda.Device(cuda_device)
         _ = device.attributes, device.mem_info
         
-        logger.info(f"CuPyを使用します (GPU {cuda_device})")
-        
         return cp, "cupy", True
         
     except Exception as e:
-        logger.warning(f"GPU初期化エラー: {e}")
-        logger.info("NumPyバックエンドにフォールバックします")
+        logger.warning(f"GPU {cuda_device} を初期化できないためNumPyで計算します: {e}")
         return np, "numpy", False
 
 
@@ -232,8 +256,8 @@ def get_gpu_info(cuda_device: int = 0) -> Optional[dict]:
             "used_memory_gb": (mem_info[1] - mem_info[0]) / 1024**3,
         }
     except Exception as e:
-        logger.error(f"GPU情報取得エラー: {e}")
-        traceback.print_exc()
+        logger.warning(f"GPU情報を取得できません: {e}")
+        logger.debug("詳細", exc_info=True)
         return None
 
 
@@ -262,18 +286,20 @@ def list_cuda_devices() -> list:
 
 
 # VRAM管理
-def get_vram_budget(max_vram_ratio: float = 0.5, cuda_device: int = 0) -> Tuple[int, int]:
+def get_vram_budget(max_vram_ratio: float = 0.5, cuda_device: int = 0,
+                    use_gpu: bool = True) -> Tuple[int, int]:
     """
     利用可能なVRAMバジェットを計算
     
     Args:
         max_vram_ratio: 最大使用率
         cuda_device: GPU番号
+        use_gpu: Falseなら（NumPyで計算する場合）主メモリから見積もる
     
     Returns:
         (available_bytes, chunk_size_limit): 利用可能バイト数、チャンクサイズ上限
     """
-    if not CUPY_AVAILABLE:
+    if not CUPY_AVAILABLE or not use_gpu:
         # CPU使用時はメモリの一部を仮想的なバジェットとする
         try:
             import psutil
@@ -310,8 +336,8 @@ def get_vram_budget(max_vram_ratio: float = 0.5, cuda_device: int = 0) -> Tuple[
         return available_bytes, chunk_size_limit
 
     except Exception as e:
-        logger.error(f"VRAMバジェット計算エラー: {e}")
-        traceback.print_exc()
+        logger.warning(f"VRAM容量を取得できないため 100 MiB で計算します: {e}")
+        logger.debug("詳細", exc_info=True)
         return 100 * 1024 * 1024, 10 * 1024 * 1024  # フォールバック: 100MB, 10MB
 
 
@@ -418,7 +444,7 @@ class Timer:
     def __exit__(self, *args):
         self.elapsed = time.time() - self.start_time
         if self.verbose:
-            logger.info(f"{self.name}: {self.elapsed:.3f}秒")
+            logger.debug(f"{self.name}: {self.elapsed:.3f} s")
 
 
 def _ensure_metric_bucket(metrics: Dict[str, Dict[str, float]], key: str) -> Dict[str, float]:
@@ -500,17 +526,16 @@ def log_metrics(metrics: Optional[Dict[str, Any]]) -> None:
     """収集したメトリクスをログ出力"""
     if not metrics:
         return
-    formatted = []
+    lines = []
     for key, value in metrics.items():
         if isinstance(value, dict):
-            formatted.append(
-                f"{key}: count={value.get('count', 0):.0f}, "
-                f"total={value.get('total', 0.0):.3f}s, "
-                f"max={value.get('max', 0.0):.3f}s"
-            )
+            lines.append(f"  {key}: {value.get('count', 0):.0f}回, 計 {value.get('total', 0.0):.3f} s, "
+                         f"最大 {value.get('max', 0.0):.3f} s")
+        elif key.endswith("_bytes_max"):
+            lines.append(f"  {key}: {value / 1024**2:.1f} MiB")
         else:
-            formatted.append(f"{key}: {value}")
-    logger.info("Telemetry metrics -> " + "; ".join(formatted))
+            lines.append(f"  {key}: {value:g}")
+    logger.debug("計測値:\n" + "\n".join(lines))
 
 def _log_interpolate(x: Any, xp: Any, fp: Any, backend: Any) -> Any:
     x_flat = backend.asarray(transfer_to_device(x, backend)).ravel()
@@ -590,6 +615,25 @@ def create_evaluation_mask(f_grid: np.ndarray, f_L: float, f_H: float,
     return (f_grid >= f_L) & (f_grid <= f_H)
 
 
+def auto_target_terms(v_supply: float, ripple_ratio: Optional[float], ripple_voltage: Optional[float],
+                      i_max: float, switching_activity: Optional[float],
+                      i_transient: Optional[float]) -> Tuple[float, float]:
+    """自動計算モードの (許容リップル電圧 ΔV [V], 過渡電流 ΔI [A])"""
+    if ripple_voltage is not None:
+        delta_v = ripple_voltage
+    elif ripple_ratio is not None:
+        delta_v = v_supply * (ripple_ratio / 100.0)
+    else:
+        raise ValueError("ripple_ratio または ripple_voltage のいずれかを指定する必要があります")
+    if i_transient is not None:
+        i_trans = i_transient
+    elif switching_activity is not None:
+        i_trans = i_max * switching_activity
+    else:
+        i_trans = i_max * 0.5  # 既定は i_max の 50%
+    return delta_v, i_trans
+
+
 # 目標インピーダンス計算（自動モード）
 def calculate_target_impedance_auto(
     v_supply: float,
@@ -618,22 +662,8 @@ def calculate_target_impedance_auto(
     Notes:
         理論式: Z_target = (ΔV_ripple × (1 - margin/100)) / I_transient
     """
-    # 許容リップル電圧の決定
-    if ripple_voltage is not None:
-        delta_v = ripple_voltage
-    elif ripple_ratio is not None:
-        delta_v = v_supply * (ripple_ratio / 100.0)
-    else:
-        raise ValueError("ripple_ratio または ripple_voltage のいずれかを指定する必要があります")
-
-    # 過渡電流の決定
-    if i_transient is not None:
-        i_trans = i_transient
-    elif switching_activity is not None:
-        i_trans = i_max * switching_activity
-    else:
-        # デフォルトとして i_max の 50% を使用
-        i_trans = i_max * 0.5
+    delta_v, i_trans = auto_target_terms(v_supply, ripple_ratio, ripple_voltage, i_max,
+                                         switching_activity, i_transient)
 
     # デザインマージンの適用
     delta_v_design = delta_v * (1.0 - design_margin / 100.0)
@@ -641,9 +671,9 @@ def calculate_target_impedance_auto(
     # 目標インピーダンス
     z_target = delta_v_design / i_trans
 
-    logger.info(
-        f"自動計算モード: V_supply={v_supply}V, ΔV_ripple={delta_v*1000:.2f}mV, "
-        f"I_transient={i_trans}A, margin={design_margin}%, Z_target={z_target*1000:.3f}mΩ"
+    logger.debug(
+        f"目標インピーダンス(auto): V={v_supply} V, ΔV={delta_v * 1e3:.3g} mV, "
+        f"ΔI={i_trans:.3g} A, margin={design_margin} % -> {z_target * 1e3:.3g} mΩ"
     )
 
     return z_target
@@ -768,33 +798,27 @@ def safe_divide(numerator: Any, denominator: Any, fill_value: float = 0.0,
 
 # プログレスバー用ヘルパー
 def get_progress_bar(iterable, desc: str = None, total: int = None,
-                     disable: bool = False, dynamic: bool = True):
-    """
-    tqdmプログレスバーを取得（ターミナル幅に追従可）
+                     disable: bool = False, dynamic: bool = True, unit: str = "it",
+                     unit_scale: Optional[bool] = None):
+    """tqdmプログレスバー（ターミナル幅に追従）。tqdmが無ければiterableをそのまま返す。
 
-    Args:
-        iterable: イテラブル
-        desc: 説明文
-        total: 総数
-        disable: 無効化フラグ
-        dynamic: ターミナル幅に追従させる（dynamic_ncols）
-
-    Returns:
-        tqdmオブジェクト
+    unit_scale=None では総数が1000以上のときだけ k/M 表記にする。
     """
     try:
         from tqdm import tqdm
-        # bar_format を指定しないか、最小限に留める
-        return tqdm(
-            iterable,
-            desc=desc,
-            total=total,
-            disable=disable,
-            dynamic_ncols=dynamic,
-        )
     except ImportError:
-        logger.warning("tqdmが利用できません")
         return iterable
+    return tqdm(
+        iterable,
+        desc=desc,
+        total=total,
+        disable=disable,
+        dynamic_ncols=dynamic,
+        unit=unit,
+        unit_scale=(total or 0) >= 1000 if unit_scale is None else unit_scale,
+        file=sys.stderr,
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+    )
 
 
 # 結果の検証
