@@ -107,6 +107,7 @@ excel_name = "dcap_result"
 
 # コンデンサリスト
 # SPICEモデルがある場合はpathを指定、ない場合はRLC値を直接指定
+# 数値は文字列で SI接頭辞も使える（例: C = "220u", ESL = "0.4nH", ESR = "10m"。m=ミリ、M=メガ）
 [[capacitors]]
 name = "C_0603_0.1u"
 C = 0.1e-6

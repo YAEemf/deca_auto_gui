@@ -1,8 +1,10 @@
+import json
 import os
 import queue
 import threading
+import unicodedata
 from copy import deepcopy
-from math import isfinite
+from math import ceil, floor, isfinite, log10
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -14,7 +16,7 @@ import streamlit as st
 from deca_auto.__main__ import calculate_zc
 from deca_auto.config import (
     WEIGHT_FIELDS, WEIGHT_RANGE, UserConfig, default_weights, get_localized_text,
-    load_config, save_config, validate_config,
+    config_error, load_config, save_config,
 )
 from deca_auto.evaluator import format_combination_name
 from deca_auto.main import run_optimization
@@ -352,15 +354,19 @@ def format_usage_range(minimum, maximum):
 
 
 def parse_usage_range(text):
-    if not text:
+    """「3」「-5」「2-」「3-5」を (MIN, MAX) にする。全角数字と「3～5」「3〜5」も受け付ける。"""
+    normalized = unicodedata.normalize("NFKC", text).replace("〜", "-").replace("~", "-").replace(" ", "")
+    if not normalized:
         return None, None
-    low, separator, high = text.partition("-")
-    minimum = int(low) if low else None
-    maximum = (int(high) if high else None) if separator else minimum
-    if maximum is not None and (maximum < 0 or (minimum is not None and maximum < minimum)):
-        raise ValueError(f"無効な使用数範囲: {text}")
-    if text == "-":
-        raise ValueError(f"無効な使用数範囲: {text}")
+    low, separator, high = normalized.partition("-")
+    try:
+        minimum = int(low) if low else None
+        maximum = (int(high) if high else None) if separator else minimum
+    except ValueError:
+        raise ValueError(f"無効な使用数範囲: {text}（例: 3, -5, 2-, 3-5）") from None
+    if normalized == "-" or any(v is not None and v < 0 for v in (minimum, maximum)) or (
+            maximum is not None and minimum is not None and maximum < minimum):
+        raise ValueError(f"無効な使用数範囲: {text}（例: 3, -5, 2-, 3-5）")
     return minimum, maximum
 
 
@@ -372,13 +378,21 @@ def capacitor_row(cap):
 
 
 def cell_text(value):
-    return "" if pd.isna(value) else str(value).strip()
+    return "" if value is None or pd.isna(value) else str(value).strip()
+
+
+def is_blank_row(row, columns):
+    """＋で追加した直後など、表示列がすべて空の行（入力途中の行として無視する）。"""
+    return all(not cell_text(row[column]) for column in columns)
 
 
 def parse_capacitors(edited, source):
     caps = []
     names = set()
+    visible = [*CAP_COLUMNS.values(), "usage_range"]
     for _, row in edited.iterrows():
+        if is_blank_row(row, visible):
+            continue
         original = source[int(row["_source"])] if pd.notna(row["_source"]) else {}
         cap = original.copy()
         original_row = capacitor_row(original)
@@ -402,6 +416,8 @@ def parse_capacitors(edited, source):
         name = cap.get("name") or Path(cap.get("path") or "").stem
         if not name:
             raise ValueError("コンデンサの名前またはモデルパスを入力してください。")
+        if not cap.get("path") and cap.get("C") is None:
+            raise ValueError(f"{name}: 容量 C またはモデルパスを入力してください。")
         base = name
         suffix = 1
         while name in names:
@@ -417,6 +433,7 @@ def parse_capacitors(edited, source):
 def render_capacitors():
     state = st.session_state
     st.subheader(localized("capacitor_list"))
+    st.caption(localized("number_format_hint"))
     if CAP_EDITOR_KEY not in state.editor_sources:
         state.editor_sources[CAP_EDITOR_KEY] = deepcopy(state.config.capacitors)
     source = state.editor_sources[CAP_EDITOR_KEY]
@@ -440,6 +457,22 @@ def render_capacitors():
         state.input_errors.pop(CAP_EDITOR_KEY, None)
 
 
+def parse_custom_mask(edited):
+    points = []
+    for _, row in edited.iterrows():
+        if is_blank_row(row, MASK_COLUMNS):
+            continue
+        texts = [cell_text(row[column]) for column in MASK_COLUMNS]
+        if not all(texts):
+            raise ValueError("周波数とインピーダンスの両方を入力してください。")
+        points.append(tuple(map(parse_number, texts)))
+    if not points:
+        raise ValueError("カスタムマスクに1点以上入力してください。")
+    if any(f <= 0 or z <= 0 for f, z in points):
+        raise ValueError("周波数とインピーダンスには正の値を入力してください。")
+    return sorted(points)
+
+
 def render_custom_mask():
     state = st.session_state
     if MASK_EDITOR_KEY not in state.editor_sources:
@@ -451,13 +484,8 @@ def render_custom_mask():
         original, num_rows="dynamic", width="stretch", hide_index=True, key=MASK_EDITOR_KEY,
     )
     try:
-        if edited.equals(original):
-            state.config.z_custom_mask = source
-        else:
-            points = [tuple(map(parse_number, row)) for row in edited.itertuples(index=False, name=None)]
-            if any(f <= 0 or z <= 0 for f, z in points):
-                raise ValueError("周波数とインピーダンスには正の値を入力してください。")
-            state.config.z_custom_mask = sorted(points)
+        # 未編集なら元の値（表示用に整形する前の数値）をそのまま使う
+        state.config.z_custom_mask = source if edited.equals(original) and source else parse_custom_mask(edited)
     except ValueError as exc:
         state.input_errors[MASK_EDITOR_KEY] = str(exc)
         st.error(str(exc))
@@ -586,6 +614,35 @@ def create_results_tab():
         render_finished_pdn_results()
 
 
+# 周波数軸の目盛ラベル: 1kHz以上は k/M/G を付け、1kHz未満は数値のまま（例: 100, 1k, 10M, 1G）
+FREQUENCY_LABEL_EXPR = (
+    "datum.value >= 1e9 ? format(datum.value / 1e9, '~g') + 'G'"
+    " : datum.value >= 1e6 ? format(datum.value / 1e6, '~g') + 'M'"
+    " : datum.value >= 1e3 ? format(datum.value / 1e3, '~g') + 'k'"
+    " : format(datum.value, '~g')"
+)
+
+
+def frequency_axis(f_min, f_max):
+    """対数周波数軸。目盛線は各桁の1～9倍、ラベルは桁の頭（狭い範囲では1・2・5倍）に付ける。"""
+    lo, hi = floor(log10(f_min)), ceil(log10(f_max))
+    ticks = [(m, m * 10.0 ** k) for k in range(lo, hi + 1) for m in range(1, 10)]
+    ticks = [(m, v) for m, v in ticks if f_min * (1 - 1e-9) <= v <= f_max * (1 + 1e-9)]
+    for steps in ((1,), (1, 2, 5), tuple(range(1, 10))):
+        labelled = [v for m, v in ticks if m in steps]
+        if len(labelled) >= 3:
+            break
+    return alt.Axis(
+        title="Frequency [Hz]", grid=True, values=[v for _, v in ticks], labelOverlap=False,
+        labelExpr=f"indexof({json.dumps(labelled)}, datum.value) < 0 ? '' : {FREQUENCY_LABEL_EXPR}",
+    )
+
+
+def frequency_tooltip():
+    # 1kHz以上は SI接頭辞付きの有効4桁（例: 123.5k, 1.2M）
+    return alt.Tooltip("Frequency:Q", title="Frequency [Hz]", format=".4~s")
+
+
 def create_zc_chart() -> alt.Chart:
     """コンデンサZ_c特性のグラフ作成"""
     from deca_auto.utils import create_decimated_indices
@@ -628,13 +685,13 @@ def create_zc_chart() -> alt.Chart:
     chart = alt.Chart(df).mark_line().encode(
         x=alt.X('Frequency:Q',
                 scale=x_scale,
-                axis=alt.Axis(title='Frequency [Hz]', grid=True, format='.1e')),
+                axis=frequency_axis(f_min, f_max)),
         y=alt.Y('Impedance:Q',
                 scale=alt.Scale(type='log', base=10),
                 axis=alt.Axis(title='|Z_c| [Ω]', grid=True)),
         color=alt.Color('Capacitor:N', legend=alt.Legend(title='Capacitor')),
         tooltip=['Capacitor:N',
-                alt.Tooltip('Frequency:Q', format='.3e'),
+                frequency_tooltip(),
                 alt.Tooltip('Impedance:Q', format='.3e')]
     ).properties(
         width=750,
@@ -763,7 +820,7 @@ def create_zpdn_chart() -> alt.Chart:
         x=alt.X(
             'Frequency:Q',
             scale=x_scale,
-            axis=alt.Axis(title='Frequency [Hz]', grid=True, format='.1e')
+            axis=frequency_axis(f_min, f_max)
         ),
         y=alt.Y(
             'Impedance:Q',
@@ -786,7 +843,7 @@ def create_zpdn_chart() -> alt.Chart:
         order='Order:O',
         tooltip=[
             'Type:N',
-            alt.Tooltip('Frequency:Q', format='.3e'),
+            frequency_tooltip(),
             alt.Tooltip('Impedance:Q', format='.3e')
         ]
     ).properties(
@@ -842,8 +899,12 @@ def start_optimization():
     if state.optimization_running:
         return
     config = deepcopy(state.config)
-    if state.input_errors or not validate_config(config):
-        state.result_notice = ("error", "設定が無効です")
+    if state.input_errors:
+        state.result_notice = ("error", "入力エラーを修正してください。")
+        return
+    error = config_error(config)
+    if error is not None:
+        state.result_notice = ("error", f"設定が無効です: {error}")
         return
 
     clear_results(deepcopy(config))
@@ -871,6 +932,10 @@ def calculate_zc_only():
         state.result_notice = ("error", "入力エラーを修正してください。")
         return
     config = deepcopy(state.config)
+    error = config_error(config)
+    if error is not None:
+        state.result_notice = ("error", f"設定が無効です: {error}")
+        return
     try:
         grid, impedances = calculate_zc(config, allow_gpu=True)
         target = create_target_mask(

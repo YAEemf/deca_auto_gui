@@ -1,6 +1,9 @@
 import time
 import logging
+import re
 import sys
+import unicodedata
+from decimal import Decimal
 from typing import Optional, Union, Any, Tuple, List, Dict
 from contextlib import contextmanager
 import numpy as np
@@ -884,26 +887,34 @@ def create_decimated_indices(data_length: int, max_points: int) -> list:
     return list(range(0, data_length, step))
 
 
+# 数値入力で使えるSI接頭辞と10の指数（大文字小文字を区別: m=ミリ, M=メガ。SPICE流の meg もメガ）
+SI_PREFIXES = {
+    "f": -15, "p": -12, "n": -9, "u": -6, "μ": -6, "m": -3,
+    "k": 3, "K": 3, "M": 6, "meg": 6, "Meg": 6, "MEG": 6, "G": 9, "T": 12,
+}
+_PREFIX_PATTERN = "|".join(sorted(map(re.escape, SI_PREFIXES), key=len, reverse=True))
+# 末尾の単位記号は読み飛ばす（値は入力欄の単位で解釈する）
+_UNIT_PATTERN = r"Hz|hz|HZ|F|H|Ω|[oO]hm|V|A"
+_NUMBER_RE = re.compile(
+    rf"(?P<mantissa>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+    rf"\s*(?P<prefix>{_PREFIX_PATTERN})?(?:{_UNIT_PATTERN})?"
+)
+# 抵抗・コンデンサの表記で小数点の位置に接頭辞を置く形（4u7 = 4.7u, 2R2 = 2.2）
+_RKM_RE = re.compile(rf"(?P<integer>\d+)(?P<prefix>{_PREFIX_PATTERN}|R)(?P<fraction>\d+)\s*(?:{_UNIT_PATTERN})?")
+_EXPONENT_ONLY_RE = re.compile(r"[eE](?P<exponent>[+-]?\d+)")  # 従来から受け付けている "e3" = 1e3
+NUMBER_FORMAT_HINT = "例: 2.2e-6, 2.2u, 2.2μF, 4u7, 100MHz, 0.4n, 10m"
+
+
 def parse_scientific_notation(value: Any) -> float:
     """
-    科学的記数法を解析（10e3, 1.6e-19形式に対応）
+    数値入力を解析する。
 
-    Args:
-        value: 解析する値
-
-    Returns:
-        float: 解析された浮動小数点数
+    指数表記（1e-9, 10e3, 1.5E+6）、SI接頭辞（220u, 220μ, 4.7n, 10p, 10m, 1k, 100M, 1meg, 1G）、
+    RKM表記（4u7, 4n7, 2R2）、末尾の単位記号（220uF, 0.4nH, 10mΩ, 100MHz）、全角の数字・記号を受け付ける。
+    接頭辞は大文字小文字を区別する（m はミリ、M はメガ）。
 
     Raises:
         ValueError: 無効な値または形式の場合
-
-    Examples:
-        >>> parse_scientific_notation("10e3")
-        10000.0
-        >>> parse_scientific_notation("1.5e-9")
-        1.5e-09
-        >>> parse_scientific_notation(100)
-        100.0
     """
     if value is None:
         raise ValueError("値がNoneです")
@@ -912,27 +923,28 @@ def parse_scientific_notation(value: Any) -> float:
     if isinstance(value, (int, float)):
         return float(value)
 
-    # 文字列に変換
-    value_str = str(value).strip()
-    if not value_str:
+    # 全角数字・µ(マイクロ記号)・Ω(オーム記号)を半角/ギリシャ文字に揃える
+    text = unicodedata.normalize("NFKC", str(value)).strip()
+    if not text:
         raise ValueError("空の文字列です")
 
     try:
-        # 通常の浮動小数点数として解析を試みる
-        return float(value_str)
+        return float(text)
     except ValueError:
-        # 10e3形式の場合の処理
-        value_str = value_str.replace(" ", "")
-        if "e" in value_str.lower():
-            parts = value_str.lower().split("e")
-            if len(parts) == 2:
-                try:
-                    base = float(parts[0]) if parts[0] else 1.0
-                    exp = float(parts[1])
-                    return base * (10 ** exp)
-                except:
-                    pass
-        raise ValueError(f"無効な数値形式: {value_str}")
+        pass
+
+    # 10進のまま桁をずらして丸める（220u が 220e-6 と同じ値になる）
+    match = _NUMBER_RE.fullmatch(text)
+    if match:
+        return float(Decimal(match["mantissa"]).scaleb(SI_PREFIXES.get(match["prefix"], 0)))
+    match = _RKM_RE.fullmatch(text)
+    if match:
+        exponent = 0 if match["prefix"] == "R" else SI_PREFIXES[match["prefix"]]
+        return float(Decimal(f"{match['integer']}.{match['fraction']}").scaleb(exponent))
+    match = _EXPONENT_ONLY_RE.fullmatch(text)
+    if match:
+        return float(f"1e{match['exponent']}")
+    raise ValueError(f"無効な数値形式: {value}（{NUMBER_FORMAT_HINT}）")
 
 
 def get_custom_mask_freq_range(z_custom_mask: Optional[List[Tuple[float, float]]]) -> Tuple[Optional[float], Optional[float]]:

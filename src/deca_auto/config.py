@@ -463,15 +463,16 @@ def save_config(config: UserConfig, config_path: Union[str, Path]) -> bool:
 
 
 def validate_config(config: UserConfig) -> bool:
-    """
-    設定の妥当性を検証
-    
-    Args:
-        config: 検証する設定
-    
-    Returns:
-        bool: 検証成功フラグ
-    """
+    """設定の妥当性を検証し、無効なら理由をログに出してFalseを返す。"""
+    error = config_error(config)
+    if error is not None:
+        logger.error(f"設定が無効です: {error}")
+        return False
+    return True
+
+
+def config_error(config: UserConfig) -> Optional[str]:
+    """設定が無効な理由を返す。有効ならNone。"""
     try:
         # 周波数範囲の検証
         assert config.f_start > 0, "開始周波数は正の値である必要があります"
@@ -516,15 +517,16 @@ def validate_config(config: UserConfig) -> bool:
             assert 0 <= config.design_margin <= 100, "デザインマージンは0-100%の範囲である必要があります"
 
         # カスタムマスクの検証
-        if config.target_impedance_mode == "custom" or config.z_custom_mask:
-            if config.z_custom_mask:
-                for i, (f, z) in enumerate(config.z_custom_mask):
-                    assert f > 0, f"カスタムマスク[{i}]の周波数は正の値である必要があります"
-                    assert z > 0, f"カスタムマスク[{i}]のインピーダンスは正の値である必要があります"
+        if config.target_impedance_mode == "custom":
+            assert config.z_custom_mask, "カスタムマスクに1点以上入力してください"
+        if config.z_custom_mask:
+            for i, (f, z) in enumerate(config.z_custom_mask):
+                assert f > 0, f"カスタムマスク[{i}]の周波数は正の値である必要があります"
+                assert z > 0, f"カスタムマスク[{i}]のインピーダンスは正の値である必要があります"
 
-                # 周波数の昇順チェック
-                freqs = [f for f, _ in config.z_custom_mask]
-                assert freqs == sorted(freqs), "カスタムマスクの周波数は昇順である必要があります"
+            # 周波数の昇順チェック
+            freqs = [f for f, _ in config.z_custom_mask]
+            assert freqs == sorted(freqs), "カスタムマスクの周波数は昇順である必要があります"
         
         # PDN寄生成分の検証
         assert all(getattr(config, f) >= 0 for f in ["R_vrm", "L_vrm", "R_sN", "L_sN", "L_mntN", "R_s", "L_s", "R_v", "L_v", "R_p", "C_p", "tan_delta_p"]), \
@@ -534,9 +536,10 @@ def validate_config(config: UserConfig) -> bool:
         assert len(config.capacitors) > 0, "コンデンサリストが空です"
         for i, cap in enumerate(config.capacitors):
             assert "name" in cap, f"コンデンサ[{i}]に名前がありません"
-            if "path" not in cap:
-                if "C" in cap:
-                    assert cap["C"] > 0, f"コンデンサ[{i}]の容量は正の値である必要があります"
+            if not cap.get("path"):
+                # モデルパスが無ければRLCで計算するため容量が必須（無いと既定値で黙って計算される）
+                assert cap.get("C") is not None, f"コンデンサ {cap['name']} の容量 C またはモデルパスを指定してください"
+                assert cap["C"] > 0, f"コンデンサ {cap['name']} の容量は正の値である必要があります"
 
             min_val = cap.get("MIN") if isinstance(cap, dict) else None
             max_val = cap.get("MAX") if isinstance(cap, dict) else None
@@ -578,14 +581,12 @@ def validate_config(config: UserConfig) -> bool:
         assert config.server_port > 0, "ポート番号は正の値である必要があります"
         assert config.language in ["jp", "en"], "言語設定が無効です"
         
-        return True
-        
+        return None
+
     except AssertionError as e:
-        logger.error(f"設定が無効です: {e}")
-        return False
+        return str(e)
     except (TypeError, ValueError) as e:
-        logger.error(f"設定値の型が不正です: {e}")
-        return False
+        return f"設定値の型が不正です: {e}"
 
 
 def resolve_capacitor_usage_bounds(config: UserConfig,
@@ -704,6 +705,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "theme": "テーマ",
             "stray_parameters": "寄生成分",
             "usage_range": "使用数範囲",
+            "number_format_hint": "数値は 2.2e-6 のほか 2.2u・2.2μF・4u7・0.4nH・100MHz でも入力できます（m=ミリ、M=メガ）。",
             "show_column": "",
             "show_column_help": "グラフの表示を切り替え",
             "label_R_vrm": "R_vrm [Ω]",
@@ -771,6 +773,7 @@ def get_localized_text(key: str, config: UserConfig) -> str:
             "theme": "theme",
             "stray_parameters": "Stray Parameters",
             "usage_range": "Usage Range",
+            "number_format_hint": "Numbers accept 2.2e-6 as well as 2.2u, 2.2μF, 4u7, 0.4nH and 100MHz (m = milli, M = mega).",
             "show_column": "",
             "show_column_help": "Toggle visibility in the chart",
             "label_R_vrm": "R_vrm [Ω]",
