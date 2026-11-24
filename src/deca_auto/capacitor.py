@@ -13,11 +13,11 @@ from deca_auto.utils import (
 )
 
 try:
-    import PySpice.Logging.Logging as Logging
     from PySpice.Spice.Netlist import Circuit
     PYSPICE_AVAILABLE = True
-    # PySpiceのログレベルを調整
-    Logging.setup_logging(logging_level='WARNING')
+    # PySpice.Logging.setup_logging() は dictConfig で既存ロガー（deca_auto含む）を
+    # 無効化し、ルートにINFOハンドラを足すため使わない
+    logging.getLogger('PySpice').setLevel(logging.WARNING)
 except ImportError:
     PYSPICE_AVAILABLE = False
     logger.warning("PySpiceが利用できません。RLCモデルのみ使用します")
